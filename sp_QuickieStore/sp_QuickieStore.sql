@@ -4050,6 +4050,31 @@ BEGIN
         object_id integer NOT NULL
     );
 
+    CREATE TABLE
+        #hi_output
+    (
+        primary_window nvarchar(60) NULL,
+        object_name nvarchar(500) NULL,
+        query_sql_text nvarchar(max) NULL,
+        top_waits nvarchar(max) NULL,
+        query_hash binary(8) NOT NULL,
+        query_count bigint NOT NULL,
+        plan_count bigint NOT NULL,
+        query_id_list nvarchar(max) NULL,
+        plan_id_list nvarchar(max) NULL,
+        impact_score decimal(4, 2) NULL,
+        high_signals nvarchar(4000) NULL,
+        total_executions bigint NOT NULL,
+        cpu_share decimal(5, 1) NULL,
+        duration_share decimal(5, 1) NULL,
+        physical_reads_share decimal(5, 1) NULL,
+        writes_share decimal(5, 1) NULL,
+        memory_share decimal(5, 1) NULL,
+        executions_share decimal(5, 1) NULL,
+        diagnostics nvarchar(4000) NULL,
+        volatile_metrics nvarchar(4000) NULL
+    );
+
     /*Step 1: Aggregate runtime stats to query_hash level*/
     SELECT
         @current_table = 'inserting #hi_query_stats',
@@ -5127,7 +5152,422 @@ OPTION(RECOMPILE);' + @nc10;
                 ELSE N'No dominant queries. Look for forced parameterization opportunities, missing schema prefixes (dbo.Proc vs Proc), temp table patterns causing recompilation, or RECOMPILE hints generating unique plans.'
             END;
 
-    /*Step 6: Final output (dynamic SQL for OUTER APPLY to query plan)*/
+    /*Step 6: Assemble output (static SQL, no plans yet)*/
+    SELECT
+        @current_table = 'inserting #hi_output',
+        @sql = N'';
+
+    IF @troubleshoot_performance = 1
+    BEGIN
+        EXECUTE sys.sp_executesql
+            @troubleshoot_insert,
+          N'@current_table nvarchar(100)',
+            @current_table;
+
+        SET STATISTICS XML ON;
+    END;
+
+    INSERT
+        #hi_output WITH (TABLOCK)
+    (
+        primary_window,
+        object_name,
+        query_sql_text,
+        top_waits,
+        query_hash,
+        query_count,
+        plan_count,
+        query_id_list,
+        plan_id_list,
+        impact_score,
+        high_signals,
+        total_executions,
+        cpu_share,
+        duration_share,
+        physical_reads_share,
+        writes_share,
+        memory_share,
+        executions_share,
+        diagnostics,
+        volatile_metrics
+    )
+    SELECT
+        pw.primary_window,
+        qi.object_name,
+        rt.query_sql_text,
+        top_waits =
+            CASE
+                WHEN @new = 1
+                 AND @query_store_waits_enabled = 1
+                THEN qw.top_waits
+            END,
+        s.query_hash,
+        s.query_count,
+        s.plan_count,
+        qi.query_id_list,
+        qi.plan_id_list,
+        impact_score =
+            CONVERT
+            (
+                decimal(4, 2),
+                (
+                    ISNULL(s.cpu_pctl, 0) +
+                    ISNULL(s.duration_pctl, 0) +
+                    ISNULL(s.reads_pctl, 0) +
+                    ISNULL(s.writes_pctl, 0) +
+                    ISNULL(s.memory_pctl, 0) +
+                    ISNULL(s.executions_pctl, 0)
+                ) /
+                NULLIF
+                (
+                    CASE WHEN s.cpu_pctl        IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.duration_pctl   IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
+                    0
+                )
+            ),
+        high_signals =
+            STUFF
+            (
+                ISNULL(N', ' + CASE WHEN s.cpu_pctl        >= 0.80 THEN N'cpu' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.duration_pctl   >= 0.80 THEN N'duration' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.reads_pctl      >= 0.80 THEN N'physical reads' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.writes_pctl     >= 0.80 THEN N'writes' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.memory_pctl     >= 0.80 THEN N'memory' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.executions_pctl >= 0.80 THEN N'executions' END, N''),
+                1,
+                2,
+                N''
+            ),
+        s.total_executions,
+        s.cpu_share,
+        s.duration_share,
+        physical_reads_share =
+            s.reads_share,
+        s.writes_share,
+        s.memory_share,
+        s.executions_share,
+        diagnostics =
+            STUFF
+            (
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.avg_duration_ms > s.avg_cpu_ms * 5
+                         AND s.avg_duration_ms > 100
+                        THEN N'wait time (dur/cpu=' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, s.avg_duration_ms / NULLIF(s.avg_cpu_ms, 0.001))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.plan_count = 1
+                         AND s.max_cpu_ms > 100
+                         AND (s.max_cpu_ms - s.min_cpu_ms) /
+                             NULLIF(s.avg_cpu_ms, 0) > 10
+                        THEN N'param sensitive (1 plan, cpu ' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_cpu_ms - s.min_cpu_ms) / NULLIF(s.avg_cpu_ms, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.plan_count > 1
+                         AND s.total_executions / s.plan_count < 5
+                         AND rt.query_sql_text NOT LIKE N'%RECOMPILE%'
+                        THEN N'plan instability (' +
+                             CONVERT(nvarchar(10), s.plan_count) +
+                             N' plans)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.total_writes_mb > 0
+                         AND rt.query_sql_text NOT LIKE N'%INSERT%'
+                         AND rt.query_sql_text NOT LIKE N'%UPDATE%'
+                         AND rt.query_sql_text NOT LIKE N'%DELETE%'
+                         AND rt.query_sql_text NOT LIKE N'%MERGE%'
+                         AND rt.query_sql_text NOT LIKE N'%INTO%'
+                        THEN N'spills/spools (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(decimal(10, 1), s.total_writes_mb / NULLIF(s.total_executions, 0))
+                             ) +
+                             N' MB/exec)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.max_dop > 1
+                         AND s.avg_duration_ms > 0
+                        THEN N'parallel efficiency (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT
+                                 (
+                                     decimal(5, 1),
+                                     IIF
+                                     (
+                                         (CONVERT(float, s.avg_cpu_ms) / s.avg_duration_ms - 1.0) /
+                                         (s.max_dop - 1.0) * 100.0 > 100.0,
+                                         100.0,
+                                         IIF
+                                         (
+                                             (CONVERT(float, s.avg_cpu_ms) / s.avg_duration_ms - 1.0) /
+                                             (s.max_dop - 1.0) * 100.0 < 0.0,
+                                             0.0,
+                                             (CONVERT(float, s.avg_cpu_ms) / s.avg_duration_ms - 1.0) /
+                                             (s.max_dop - 1.0) * 100.0
+                                         )
+                                     )
+                                 )
+                             ) +
+                             N'% @ DOP ' +
+                             CONVERT(nvarchar(10), s.max_dop) +
+                             N')'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN (s.max_duration_ms - s.min_duration_ms) /
+                             NULLIF(s.avg_duration_ms, 0) > 10
+                         AND s.max_duration_ms > 1000
+                         AND (s.max_cpu_ms - s.min_cpu_ms) /
+                             NULLIF(s.avg_cpu_ms, 0) < 3
+                        THEN N'intermittent waits (duration ' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_duration_ms - s.min_duration_ms) / NULLIF(s.avg_duration_ms, 0))
+                             ) +
+                             N'x, cpu ' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(decimal(5, 1), (s.max_cpu_ms - s.min_cpu_ms) / NULLIF(s.avg_cpu_ms, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.total_executions < 10
+                         AND (s.cpu_share > 5
+                          OR  s.duration_share > 5)
+                        THEN N'rare but expensive (' +
+                             CONVERT(nvarchar(20), s.total_executions) +
+                             N' execs, ' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT
+                                 (
+                                     decimal(5, 1),
+                                     IIF(s.cpu_share > s.duration_share, s.cpu_share, s.duration_share)
+                                 )
+                             ) +
+                             N'% share)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.query_count > 10
+                        THEN N'adhoc bloat (' +
+                             CONVERT(nvarchar(20), s.query_count) +
+                             N' variants)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N' | ' +
+                    CASE
+                        WHEN s.avg_physical_reads_mb > 50
+                        THEN N'scan heavy (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(decimal(10, 1), s.avg_physical_reads_mb)
+                             ) +
+                             N' MB/exec)'
+                    END,
+                    N''
+                ),
+                1,
+                3,
+                N''
+            ),
+        volatile_metrics =
+            STUFF
+            (
+                ISNULL
+                (
+                    N', ' +
+                    CASE
+                        WHEN s.max_cpu_ms > 100
+                         AND (s.max_cpu_ms - s.min_cpu_ms) /
+                             NULLIF(s.avg_cpu_ms, 0) > 10
+                        THEN N'cpu (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_cpu_ms - s.min_cpu_ms) / NULLIF(s.avg_cpu_ms, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N', ' +
+                    CASE
+                        WHEN s.max_duration_ms > 1000
+                         AND (s.max_duration_ms - s.min_duration_ms) /
+                             NULLIF(s.avg_duration_ms, 0) > 10
+                        THEN N'duration (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_duration_ms - s.min_duration_ms) / NULLIF(s.avg_duration_ms, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N', ' +
+                    CASE
+                        WHEN s.max_physical_reads_mb > 1
+                         AND (s.max_physical_reads_mb - s.min_physical_reads_mb) /
+                             NULLIF(s.avg_physical_reads_mb, 0) > 10
+                        THEN N'physical reads (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_physical_reads_mb - s.min_physical_reads_mb) / NULLIF(s.avg_physical_reads_mb, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N', ' +
+                    CASE
+                        WHEN s.max_writes_mb > 1
+                         AND (s.max_writes_mb - s.min_writes_mb) /
+                             NULLIF(s.avg_writes_mb, 0) > 10
+                        THEN N'writes (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_writes_mb - s.min_writes_mb) / NULLIF(s.avg_writes_mb, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ) +
+                ISNULL
+                (
+                    N', ' +
+                    CASE
+                        WHEN s.max_memory_mb > 1
+                         AND (s.max_memory_mb - s.min_memory_mb) /
+                             NULLIF(s.avg_memory_mb, 0) > 10
+                        THEN N'memory (' +
+                             CONVERT
+                             (
+                                 nvarchar(20),
+                                 CONVERT(integer, (s.max_memory_mb - s.min_memory_mb) / NULLIF(s.avg_memory_mb, 0))
+                             ) +
+                             N'x)'
+                    END,
+                    N''
+                ),
+                1,
+                2,
+                N''
+            )
+    FROM #hi_scored AS s
+    JOIN #hi_interesting AS i
+        ON s.query_hash = i.query_hash
+    LEFT JOIN #hi_representative_text AS rt
+        ON  s.query_hash = rt.query_hash
+        AND rt.rn = 1
+    LEFT JOIN #hi_query_identifiers AS qi
+        ON s.query_hash = qi.query_hash
+    LEFT JOIN #hi_primary_window AS pw
+        ON s.query_hash = pw.query_hash
+    LEFT JOIN #hi_query_waits AS qw
+        ON s.query_hash = qw.query_hash
+    WHERE
+        (
+            ISNULL(s.cpu_pctl, 0) +
+            ISNULL(s.duration_pctl, 0) +
+            ISNULL(s.reads_pctl, 0) +
+            ISNULL(s.writes_pctl, 0) +
+            ISNULL(s.memory_pctl, 0) +
+            ISNULL(s.executions_pctl, 0)
+        ) /
+        NULLIF
+        (
+            CASE WHEN s.cpu_pctl        IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.duration_pctl   IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
+            0
+        ) >= 0.50;
+
+    IF @troubleshoot_performance = 1
+    BEGIN
+        SET STATISTICS XML OFF;
+
+        EXECUTE sys.sp_executesql
+            @troubleshoot_update,
+          N'@current_table nvarchar(100)',
+            @current_table;
+    END;
+
+    /*Step 7: Final output with plans (dynamic SQL for OUTER APPLY)*/
     SELECT
         @current_table = 'selecting high impact results',
         @sql = @isolation_level;
@@ -5161,8 +5601,8 @@ SELECT
             THEN N'@end_date AT TIME ZONE @timezone'
             ELSE N'SWITCHOFFSET(@end_date, @utc_offset_string)'
         END + N',
-    pw.primary_window,
-    qi.object_name,
+    o.primary_window,
+    o.object_name,
     query_sql_text =
         (
              SELECT
@@ -5170,7 +5610,7 @@ SELECT
                      REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
                      REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
                      REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-                         rt.query_sql_text COLLATE Latin1_General_BIN2,
+                         o.query_sql_text COLLATE Latin1_General_BIN2,
                      NCHAR(31),N''?''),NCHAR(30),N''?''),NCHAR(29),N''?''),NCHAR(28),N''?''),NCHAR(27),N''?''),NCHAR(26),N''?''),NCHAR(25),N''?''),NCHAR(24),N''?''),NCHAR(23),N''?''),NCHAR(22),N''?''),
                      NCHAR(21),N''?''),NCHAR(20),N''?''),NCHAR(19),N''?''),NCHAR(18),N''?''),NCHAR(17),N''?''),NCHAR(16),N''?''),NCHAR(15),N''?''),NCHAR(14),N''?''),NCHAR(12),N''?''),
                      NCHAR(11),N''?''),NCHAR(8),N''?''),NCHAR(7),N''?''),NCHAR(6),N''?''),NCHAR(5),N''?''),NCHAR(4),N''?''),NCHAR(3),N''?''),NCHAR(2),N''?''),NCHAR(1),N''?''),NCHAR(0),N'''')
@@ -5184,402 +5624,41 @@ SELECT
     CASE
         WHEN @new = 1
          AND @query_store_waits_enabled = 1
-        THEN N'qw.top_waits,
+        THEN N'o.top_waits,
     '
         ELSE N''
-    END + N's.query_hash,
-    s.query_count,
-    s.plan_count,
-    qi.query_id_list,
-    qi.plan_id_list,
-    impact_score =
-        CONVERT
-        (
-            decimal(4, 2),
-            (
-                ISNULL(s.cpu_pctl, 0) +
-                ISNULL(s.duration_pctl, 0) +
-                ISNULL(s.reads_pctl, 0) +
-                ISNULL(s.writes_pctl, 0) +
-                ISNULL(s.memory_pctl, 0) +
-                ISNULL(s.executions_pctl, 0)
-            ) /
-            NULLIF
-            (
-                CASE WHEN s.cpu_pctl        IS NOT NULL THEN 1 ELSE 0 END +
-                CASE WHEN s.duration_pctl   IS NOT NULL THEN 1 ELSE 0 END +
-                CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
-                CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-                CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-                CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
-                0
-            )
-        ),
-    high_signals =
-        STUFF
-        (
-            ISNULL(N'', '' + CASE WHEN s.cpu_pctl        >= 0.80 THEN N''cpu'' END, N'''') +
-            ISNULL(N'', '' + CASE WHEN s.duration_pctl   >= 0.80 THEN N''duration'' END, N'''') +
-            ISNULL(N'', '' + CASE WHEN s.reads_pctl      >= 0.80 THEN N''physical reads'' END, N'''') +
-            ISNULL(N'', '' + CASE WHEN s.writes_pctl     >= 0.80 THEN N''writes'' END, N'''') +
-            ISNULL(N'', '' + CASE WHEN s.memory_pctl     >= 0.80 THEN N''memory'' END, N'''') +
-            ISNULL(N'', '' + CASE WHEN s.executions_pctl >= 0.80 THEN N''executions'' END, N''''),
-            1,
-            2,
-            N''''
-        ),
-    s.total_executions,
-    s.cpu_share,
-    s.duration_share,
-    physical_reads_share =
-        s.reads_share,
-    s.writes_share,
-    s.memory_share,
-    s.executions_share,
-    diagnostics =
-        STUFF
-        (
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.avg_duration_ms > s.avg_cpu_ms * 5
-                     AND s.avg_duration_ms > 100
-                    THEN N''wait time (dur/cpu='' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, s.avg_duration_ms / NULLIF(s.avg_cpu_ms, 0.001))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.plan_count = 1
-                     AND s.max_cpu_ms > 100
-                     AND (s.max_cpu_ms - s.min_cpu_ms) /
-                         NULLIF(s.avg_cpu_ms, 0) > 10
-                    THEN N''param sensitive (1 plan, cpu '' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_cpu_ms - s.min_cpu_ms) / NULLIF(s.avg_cpu_ms, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.plan_count > 1
-                     AND s.total_executions / s.plan_count < 5
-                     AND rt.query_sql_text NOT LIKE N''%RECOMPILE%''
-                    THEN N''plan instability ('' +
-                         CONVERT(nvarchar(10), s.plan_count) +
-                         N'' plans)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.total_writes_mb > 0
-                     AND rt.query_sql_text NOT LIKE N''%INSERT%''
-                     AND rt.query_sql_text NOT LIKE N''%UPDATE%''
-                     AND rt.query_sql_text NOT LIKE N''%DELETE%''
-                     AND rt.query_sql_text NOT LIKE N''%MERGE%''
-                     AND rt.query_sql_text NOT LIKE N''%INTO%''
-                    THEN N''spills/spools ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(decimal(10, 1), s.total_writes_mb / NULLIF(s.total_executions, 0))
-                         ) +
-                         N'' MB/exec)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.max_dop > 1
-                     AND s.avg_duration_ms > 0
-                    THEN N''parallel efficiency ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT
-                             (
-                                 decimal(5, 1),
-                                 IIF
-                                 (
-                                     (CONVERT(float, s.avg_cpu_ms) / s.avg_duration_ms - 1.0) /
-                                     (s.max_dop - 1.0) * 100.0 > 100.0,
-                                     100.0,
-                                     IIF
-                                     (
-                                         (CONVERT(float, s.avg_cpu_ms) / s.avg_duration_ms - 1.0) /
-                                         (s.max_dop - 1.0) * 100.0 < 0.0,
-                                         0.0,
-                                         (CONVERT(float, s.avg_cpu_ms) / s.avg_duration_ms - 1.0) /
-                                         (s.max_dop - 1.0) * 100.0
-                                     )
-                                 )
-                             )
-                         ) +
-                         N''% @ DOP '' +
-                         CONVERT(nvarchar(10), s.max_dop) +
-                         N'')''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN (s.max_duration_ms - s.min_duration_ms) /
-                         NULLIF(s.avg_duration_ms, 0) > 10
-                     AND s.max_duration_ms > 1000
-                     AND (s.max_cpu_ms - s.min_cpu_ms) /
-                         NULLIF(s.avg_cpu_ms, 0) < 3
-                    THEN N''intermittent waits (duration '' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_duration_ms - s.min_duration_ms) / NULLIF(s.avg_duration_ms, 0))
-                         ) +
-                         N''x, cpu '' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(decimal(5, 1), (s.max_cpu_ms - s.min_cpu_ms) / NULLIF(s.avg_cpu_ms, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.total_executions < 10
-                     AND (s.cpu_share > 5
-                      OR  s.duration_share > 5)
-                    THEN N''rare but expensive ('' +
-                         CONVERT(nvarchar(20), s.total_executions) +
-                         N'' execs, '' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT
-                             (
-                                 decimal(5, 1),
-                                 IIF(s.cpu_share > s.duration_share, s.cpu_share, s.duration_share)
-                             )
-                         ) +
-                         N''% share)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.query_count > 10
-                    THEN N''adhoc bloat ('' +
-                         CONVERT(nvarchar(20), s.query_count) +
-                         N'' variants)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'' | '' +
-                CASE
-                    WHEN s.avg_physical_reads_mb > 50
-                    THEN N''scan heavy ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(decimal(10, 1), s.avg_physical_reads_mb)
-                         ) +
-                         N'' MB/exec)''
-                END,
-                N''''
-            ),
-            1,
-            3,
-            N''''
-        ),
-    volatile_metrics =
-        STUFF
-        (
-            ISNULL
-            (
-                N'', '' +
-                CASE
-                    WHEN s.max_cpu_ms > 100
-                     AND (s.max_cpu_ms - s.min_cpu_ms) /
-                         NULLIF(s.avg_cpu_ms, 0) > 10
-                    THEN N''cpu ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_cpu_ms - s.min_cpu_ms) / NULLIF(s.avg_cpu_ms, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'', '' +
-                CASE
-                    WHEN s.max_duration_ms > 1000
-                     AND (s.max_duration_ms - s.min_duration_ms) /
-                         NULLIF(s.avg_duration_ms, 0) > 10
-                    THEN N''duration ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_duration_ms - s.min_duration_ms) / NULLIF(s.avg_duration_ms, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'', '' +
-                CASE
-                    WHEN s.max_physical_reads_mb > 1
-                     AND (s.max_physical_reads_mb - s.min_physical_reads_mb) /
-                         NULLIF(s.avg_physical_reads_mb, 0) > 10
-                    THEN N''physical reads ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_physical_reads_mb - s.min_physical_reads_mb) / NULLIF(s.avg_physical_reads_mb, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'', '' +
-                CASE
-                    WHEN s.max_writes_mb > 1
-                     AND (s.max_writes_mb - s.min_writes_mb) /
-                         NULLIF(s.avg_writes_mb, 0) > 10
-                    THEN N''writes ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_writes_mb - s.min_writes_mb) / NULLIF(s.avg_writes_mb, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ) +
-            ISNULL
-            (
-                N'', '' +
-                CASE
-                    WHEN s.max_memory_mb > 1
-                     AND (s.max_memory_mb - s.min_memory_mb) /
-                         NULLIF(s.avg_memory_mb, 0) > 10
-                    THEN N''memory ('' +
-                         CONVERT
-                         (
-                             nvarchar(20),
-                             CONVERT(integer, (s.max_memory_mb - s.min_memory_mb) / NULLIF(s.avg_memory_mb, 0))
-                         ) +
-                         N''x)''
-                END,
-                N''''
-            ),
-            1,
-            2,
-            N''''
-        )
-FROM #hi_scored AS s
-JOIN #hi_interesting AS i
-    ON s.query_hash = i.query_hash
-LEFT JOIN #hi_representative_text AS rt
-    ON  s.query_hash = rt.query_hash
-    AND rt.rn = 1
-LEFT JOIN #hi_query_identifiers AS qi
-    ON s.query_hash = qi.query_hash
-LEFT JOIN #hi_primary_window AS pw
-    ON s.query_hash = pw.query_hash
-' +
-    CASE
-        WHEN @new = 1
-         AND @query_store_waits_enabled = 1
-        THEN N'LEFT JOIN #hi_query_waits AS qw
-    ON s.query_hash = qw.query_hash
-'
-        ELSE N''
-    END + N'OUTER APPLY
+    END + N'o.query_hash,
+    o.query_count,
+    o.plan_count,
+    o.query_id_list,
+    o.plan_id_list,
+    o.impact_score,
+    o.high_signals,
+    o.total_executions,
+    o.cpu_share,
+    o.duration_share,
+    o.physical_reads_share,
+    o.writes_share,
+    o.memory_share,
+    o.executions_share,
+    o.diagnostics,
+    o.volatile_metrics
+FROM #hi_output AS o
+OUTER APPLY
 (
     SELECT TOP (1)
         qsp.query_plan
     FROM ' + @database_name_quoted + N'.sys.query_store_query AS qsq
     JOIN ' + @database_name_quoted + N'.sys.query_store_plan AS qsp
         ON qsq.query_id = qsp.query_id
-    WHERE qsq.query_hash = s.query_hash
+    WHERE qsq.query_hash = o.query_hash
     AND   qsp.query_plan IS NOT NULL
     ORDER BY
         qsp.last_execution_time DESC
 ) AS qp
-WHERE
-    (
-        ISNULL(s.cpu_pctl, 0) +
-        ISNULL(s.duration_pctl, 0) +
-        ISNULL(s.reads_pctl, 0) +
-        ISNULL(s.writes_pctl, 0) +
-        ISNULL(s.memory_pctl, 0) +
-        ISNULL(s.executions_pctl, 0)
-    ) /
-    NULLIF
-    (
-        CASE WHEN s.cpu_pctl        IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.duration_pctl   IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
-        0
-    ) >= 0.50
 ORDER BY
-    (
-        ISNULL(s.cpu_pctl, 0) +
-        ISNULL(s.duration_pctl, 0) +
-        ISNULL(s.reads_pctl, 0) +
-        ISNULL(s.writes_pctl, 0) +
-        ISNULL(s.memory_pctl, 0) +
-        ISNULL(s.executions_pctl, 0)
-    ) /
-    NULLIF
-    (
-        CASE WHEN s.cpu_pctl        IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.duration_pctl   IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-        CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
-        0
-    ) DESC
-OPTION(LOOP JOIN, RECOMPILE);' + @nc10;
+    o.impact_score DESC
+OPTION(RECOMPILE);' + @nc10;
 
     IF @debug = 1
     BEGIN
