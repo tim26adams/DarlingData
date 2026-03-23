@@ -5657,7 +5657,16 @@ OUTER APPLY
         qsp.last_execution_time DESC
 ) AS qp
 ORDER BY
-    o.impact_score DESC
+    o.impact_score DESC,
+    ' +
+    CASE LOWER(@sort_order)
+        WHEN 'duration'       THEN N'o.duration_share'
+        WHEN 'physical reads' THEN N'o.physical_reads_share'
+        WHEN 'writes'         THEN N'o.writes_share'
+        WHEN 'memory'         THEN N'o.memory_share'
+        WHEN 'executions'     THEN N'o.executions_share'
+        ELSE N'o.cpu_share'
+    END + N' DESC
 OPTION(RECOMPILE);' + @nc10;
 
     IF @debug = 1
