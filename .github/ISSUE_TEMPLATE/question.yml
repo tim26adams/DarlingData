@@ -1,0 +1,64 @@
+name: Question
+description: I have a question about a stored procedure
+title: "[QUESTION] "
+labels: ["question"]
+
+body:
+  - type: dropdown
+    id: script
+    attributes:
+      label: Which script is your question about?
+      options:
+        - sp_HealthParser
+        - sp_HumanEvents
+        - sp_IndexCleanup
+        - sp_LogHunter
+        - sp_PerfCheck
+        - sp_PressureDetector
+        - sp_QueryReproBuilder
+        - sp_QueryStoreCleanup
+        - sp_QuickieStore
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Script Version
+      description: All scripts have a version and version date near the top. Make sure you're on a recent version.
+      placeholder: "e.g., 2026.03.15, v4.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: question-type
+    attributes:
+      label: Is your question about how it works, or the results?
+      description: Questions about results, performance tuning, or SQL Server in general are better suited for https://www.erikdarling.com/ or https://dba.stackexchange.com/
+      options:
+        - How the script works
+        - Setup / installation
+        - Results / data interpretation
+        - Contributing / development
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What's your question?
+      description: A clear description of what you'd like to know.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: |
+        Anything that might help:
+        - SQL Server version and edition
+        - Are you using Azure SQL DB, Azure MI, or AWS RDS?
+    validations:
+      required: false

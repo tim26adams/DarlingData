@@ -1,0 +1,102 @@
+name: Bug Report
+description: Report a problem with a stored procedure
+title: "[BUG] "
+labels: ["bug"]
+
+body:
+  - type: dropdown
+    id: script
+    attributes:
+      label: Which script is affected?
+      options:
+        - sp_HealthParser
+        - sp_HumanEvents
+        - sp_IndexCleanup
+        - sp_LogHunter
+        - sp_PerfCheck
+        - sp_PressureDetector
+        - sp_QueryReproBuilder
+        - sp_QueryStoreCleanup
+        - sp_QuickieStore
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Script Version
+      description: Look near the top of the stored procedure for the version date and number.
+      placeholder: "e.g., 2026.03.15, v4.2"
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        > If you're not on the current version (dated in the last month), upgrade and retest before reporting. We fix a lot of stuff in each build and will close bug reports for older versions.
+
+  - type: input
+    id: sql-version
+    attributes:
+      label: SQL Server Version
+      description: "Run SELECT @@VERSION on the target server."
+      placeholder: "e.g., SQL Server 2019 CU25"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this? Include the parameters you used.
+      placeholder: |
+        1. Execute sp_QuickieStore with @database_name = '...', @sort_order = '...'
+        2. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened. Include the full error message if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: errors
+    attributes:
+      label: Error Messages
+      description: Paste the full error message, if any.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: |
+        Anything else that might help:
+        - Did this work in a previous version?
+        - Are you running on Azure SQL DB, Azure MI, or AWS RDS?
+        - Any relevant server configuration (compatibility level, etc.)?
+    validations:
+      required: false

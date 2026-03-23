@@ -1,0 +1,65 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "[FEATURE] "
+labels: ["enhancement"]
+
+body:
+  - type: checkboxes
+    id: script
+    attributes:
+      label: Which script(s) does this affect?
+      options:
+        - label: sp_HealthParser
+        - label: sp_HumanEvents
+        - label: sp_IndexCleanup
+        - label: sp_LogHunter
+        - label: sp_PerfCheck
+        - label: sp_PressureDetector
+        - label: sp_QueryReproBuilder
+        - label: sp_QueryStoreCleanup
+        - label: sp_QuickieStore
+        - label: Other / new script
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Describe the problem you're trying to solve or the limitation you're facing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe your proposed feature or enhancement.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: How would you use this feature? Provide a specific example.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative solutions or workarounds?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      description: "Open source is built with your help. If you're going to contribute code, please read the [contributing guide](https://github.com/erikdarlingdata/DarlingData/blob/main/CONTRIBUTING.md) first."
+      options:
+        - label: I'm willing to contribute code for this feature
+    validations:
+      required: false
