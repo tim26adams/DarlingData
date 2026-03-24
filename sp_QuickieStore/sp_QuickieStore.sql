@@ -5606,10 +5606,10 @@ OUTER APPLY
                         qsp.last_execution_time DESC
                 ),
             qsp.query_plan
-        FROM #hi_id_staging_queries AS sq
+        FROM #hi_id_staging_plans AS sp
         JOIN ' + @database_name_quoted + N'.sys.query_store_plan AS qsp
-            ON qsp.query_id = sq.query_id
-        WHERE sq.query_hash = o.query_hash
+            ON qsp.plan_id = sp.plan_id
+        WHERE sp.query_hash = o.query_hash
     ) AS qp0
     WHERE qp0.n = 1
 ) AS qp
