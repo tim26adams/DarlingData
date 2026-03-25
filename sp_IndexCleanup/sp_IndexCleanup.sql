@@ -1447,9 +1447,9 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             schema_id = s.schema_id,
             schema_name = s.name,
             object_id = i.object_id,
-            table_name = ISNULL(t.name, v.name),
+            table_name = o.name,
             index_id = i.index_id,
-            index_name = ISNULL(i.name, ISNULL(t.name, v.name) + N''.Heap''),
+            index_name = ISNULL(i.name, o.name + N''.Heap''),
             can_compress =
                 CASE
                     WHEN p.index_id > 0
@@ -1458,20 +1458,18 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                     ELSE 0
                 END
         FROM ' + QUOTENAME(@current_database_name) + N'.sys.indexes AS i
-        LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.tables AS t
-          ON i.object_id = t.object_id
-        LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.views AS v
-          ON i.object_id = v.object_id
+        JOIN ' + QUOTENAME(@current_database_name) + N'.sys.objects AS o
+          ON i.object_id = o.object_id
         JOIN ' + QUOTENAME(@current_database_name) + N'.sys.schemas AS s
-          ON ISNULL(t.schema_id, v.schema_id) = s.schema_id
+          ON o.schema_id = s.schema_id
         JOIN ' + QUOTENAME(@current_database_name) + N'.sys.partitions AS p
           ON  i.object_id = p.object_id
           AND i.index_id = p.index_id
         /* LEFT JOIN to dm_db_index_usage_stats removed 2026-01-15 - was dead code with no columns selected */
-        WHERE (t.object_id IS NULL OR t.is_ms_shipped = 0)
-        AND   (t.object_id IS NULL OR t.type <> N''TF'')
-        AND    i.is_disabled = 0
-        AND    i.is_hypothetical = 0';
+        WHERE o.is_ms_shipped = 0
+        AND   o.type IN (N''U'', N''V'')
+        AND   i.is_disabled = 0
+        AND   i.is_hypothetical = 0';
 
     IF @supports_temporal_tables = 1
     BEGIN
@@ -1971,9 +1969,9 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         schema_id = s.schema_id,
         schema_name = s.name,
         os.object_id,
-        table_name = ISNULL(t.name, v.name),
+        table_name = o.name,
         os.index_id,
-        index_name = ISNULL(i.name, ISNULL(t.name, v.name) + N''.Heap''),
+        index_name = ISNULL(i.name, o.name + N''.Heap''),
         range_scan_count = SUM(os.range_scan_count),
         singleton_lookup_count = SUM(os.singleton_lookup_count),
         forwarded_fetch_count = SUM(os.forwarded_fetch_count),
@@ -2011,12 +2009,10 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         NULL,
         NULL
     ) AS os
-    LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.tables AS t
-      ON os.object_id = t.object_id
-    LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.views AS v
-      ON os.object_id = v.object_id
+    JOIN ' + QUOTENAME(@current_database_name) + N'.sys.objects AS o
+      ON os.object_id = o.object_id
     JOIN ' + QUOTENAME(@current_database_name) + N'.sys.schemas AS s
-      ON ISNULL(t.schema_id, v.schema_id) = s.schema_id
+      ON o.schema_id = s.schema_id
     JOIN ' + QUOTENAME(@current_database_name) + N'.sys.indexes AS i
       ON  os.object_id = i.object_id
       AND os.index_id = i.index_id
@@ -2034,7 +2030,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         s.schema_id,
         s.name,
         os.object_id,
-        ISNULL(t.name, v.name),
+        o.name,
         os.index_id,
         i.name
     OPTION(RECOMPILE);
@@ -2188,8 +2184,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         i.index_id,
         s.schema_id,
         schema_name = s.name,
-        table_name = ISNULL(t.name, v.name),
-        index_name = ISNULL(i.name, ISNULL(t.name, v.name) + N''.Heap''),
+        table_name = o.name,
+        index_name = ISNULL(i.name, o.name + N''.Heap''),
         column_name = c.name,
         column_id = c.column_id,
         i.is_primary_key,
@@ -2197,15 +2193,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         i.is_unique_constraint,
         is_indexed_view =
             CASE
-                WHEN EXISTS
-                (
-                    SELECT
-                        1/0
-                    FROM ' + QUOTENAME(@current_database_name) + N'.sys.objects AS so
-                    WHERE i.object_id = so.object_id
-                    AND   so.is_ms_shipped = 0
-                    AND   so.type = ''V''
-                )
+                WHEN o.type = ''V''
                 THEN 1
                 ELSE 0
             END,
@@ -2282,12 +2270,10 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 THEN 0
             END
     FROM ' + QUOTENAME(@current_database_name) + N'.sys.indexes AS i
-    LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.tables AS t
-      ON i.object_id = t.object_id
-    LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.views AS v
-      ON i.object_id = v.object_id
+    JOIN ' + QUOTENAME(@current_database_name) + N'.sys.objects AS o
+      ON i.object_id = o.object_id
     JOIN ' + QUOTENAME(@current_database_name) + N'.sys.schemas AS s
-      ON ISNULL(t.schema_id, v.schema_id) = s.schema_id
+      ON o.schema_id = s.schema_id
     JOIN ' + QUOTENAME(@current_database_name) + N'.sys.index_columns AS ic
       ON  i.object_id = ic.object_id
       AND i.index_id = ic.index_id
@@ -2301,7 +2287,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     LEFT JOIN #usage_stats AS us
       ON  i.object_id = us.object_id
       AND i.index_id = us.index_id
-    WHERE (t.object_id IS NULL OR t.is_ms_shipped = 0)
+    WHERE o.is_ms_shipped = 0
+    AND   o.type IN (N''U'', N''V'')
     AND   i.type IN (1, 2)
     AND   i.is_disabled = 0
     AND   i.is_hypothetical = 0
@@ -2466,8 +2453,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             ps.index_id,
             s.schema_id,
             schema_name = s.name,
-            table_name = ISNULL(t.name, v.name),
-            index_name = ISNULL(i.name, ISNULL(t.name, v.name) + N''.Heap''),
+            table_name = o.name,
+            index_name = ISNULL(i.name, o.name + N''.Heap''),
             ps.partition_id,
             p.partition_number,
             total_rows = ps.row_count,
@@ -2477,12 +2464,10 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             p.data_compression_desc,
             i.data_space_id
         FROM ' + QUOTENAME(@current_database_name) + N'.sys.indexes AS i
-        LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.tables AS t
-          ON i.object_id = t.object_id
-        LEFT JOIN ' + QUOTENAME(@current_database_name) + N'.sys.views AS v
-          ON i.object_id = v.object_id
+        JOIN ' + QUOTENAME(@current_database_name) + N'.sys.objects AS o
+          ON i.object_id = o.object_id
         JOIN ' + QUOTENAME(@current_database_name) + N'.sys.schemas AS s
-          ON ISNULL(t.schema_id, v.schema_id) = s.schema_id
+          ON o.schema_id = s.schema_id
         JOIN ' + QUOTENAME(@current_database_name) + N'.sys.partitions AS p
           ON  i.object_id = p.object_id
           AND i.index_id = p.index_id
@@ -2490,7 +2475,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           ON p.partition_id = a.container_id
         LEFT HASH JOIN ' + QUOTENAME(@current_database_name) + N'.sys.dm_db_partition_stats AS ps
           ON p.partition_id = ps.partition_id
-        WHERE (t.object_id IS NULL OR t.type <> N''TF'')
+        WHERE o.type IN (N''U'', N''V'')
         AND   i.type IN (1, 2)
         AND   EXISTS
         (
@@ -2519,7 +2504,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             ps.index_id,
             s.schema_id,
             s.name,
-            ISNULL(t.name, v.name),
+            o.name,
             i.name,
             ps.partition_id,
             p.partition_number,
@@ -3233,7 +3218,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       AND NOT (ia1.is_unique = 1 AND ia2.is_unique = 0)
     WHERE ia1.consolidation_rule IS NULL  /* Not already processed */
     AND   ia2.consolidation_rule IS NULL  /* Not already processed */
-    /* Exclude unique constraints - we'll handle those separately in Rule 7 */
+    /* Don't disable unique constraints — but allow them as the wider (target) index */
     AND NOT EXISTS
     (
         SELECT
@@ -3241,14 +3226,6 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         FROM #index_details AS id1_uc
         WHERE id1_uc.index_hash = ia1.index_hash
         AND   id1_uc.is_unique_constraint = 1
-    )
-    AND NOT EXISTS
-    (
-        SELECT
-            1/0
-        FROM #index_details AS id2_uc
-        WHERE id2_uc.index_hash = ia2.index_hash
-        AND   id2_uc.is_unique_constraint = 1
     )
     AND EXISTS
     (
