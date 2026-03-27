@@ -1,4 +1,4 @@
--- Compile Date: 03/25/2026 13:41:18 UTC
+-- Compile Date: 03/27/2026 14:42:56 UTC
 SET ANSI_NULLS ON;
 SET ANSI_PADDING ON;
 SET ANSI_WARNINGS ON;
@@ -6162,6 +6162,8 @@ AND   ca.utc_timestamp < @end_date';
                     deqs.statement_end_offset
                 ) AS deps
                 WHERE deqs.sql_handle = ap.sql_handle
+                AND   deqs.statement_start_offset = ap.stmtstart
+                AND   deqs.statement_end_offset = ap.stmtend
             ) AS c
         ) AS ap
         WHERE ap.query_plan IS NOT NULL
@@ -9717,6 +9719,8 @@ BEGIN
                 deqs.statement_end_offset
             ) AS deps
             WHERE deqs.sql_handle = ap.sql_handle
+            AND   deqs.statement_start_offset = ap.stmtstart
+            AND   deqs.statement_end_offset = ap.stmtend
             AND   deps.dbid IN (ap.database_id, ap.currentdbid)
         ) AS c
     ) AS ap
@@ -12987,6 +12991,8 @@ BEGIN
                 deqs.statement_end_offset
             ) AS deps
             WHERE deqs.sql_handle = ap.sql_handle
+            AND   deqs.statement_start_offset = ap.stmtstart
+            AND   deqs.statement_end_offset = ap.stmtend
         ) AS c
     ) AS ap
     WHERE ap.query_plan IS NOT NULL
@@ -14031,6 +14037,8 @@ BEGIN
                 deqs.statement_end_offset
             ) AS deps
             WHERE deqs.sql_handle = ap.sql_handle
+            AND   deqs.statement_start_offset = ap.stmtstart
+            AND   deqs.statement_end_offset = ap.stmtend
             AND   deps.dbid IN (ap.database_id, ap.currentdbid)
         ) AS c
     ) AS ap
@@ -17257,7 +17265,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             nvarchar(MAX),
             N'.sys.dm_db_partition_stats ps
         WHERE ps.object_id = i.object_id
-        AND   ps.index_id = 1
+        AND   ps.index_id IN (0, 1)
         AND   ps.row_count >= @min_rows
     )'
         );
@@ -19470,8 +19478,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             CASE
                 WHEN ia.action = N'MAKE UNIQUE'
                 THEN N'CREATE UNIQUE '
-                WHEN ia.action = N'MERGE INCLUDES'
-                THEN N'CREATE '
+                WHEN ia.is_unique = 1
+                THEN N'CREATE UNIQUE '
                 ELSE N'CREATE '
             END +
             N'INDEX ' +
