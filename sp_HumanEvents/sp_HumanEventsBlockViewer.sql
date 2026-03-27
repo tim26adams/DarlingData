@@ -1814,6 +1814,8 @@ BEGIN
                 deqs.statement_end_offset
             ) AS deps
             WHERE deqs.sql_handle = ap.sql_handle
+            AND   deqs.statement_start_offset = ap.stmtstart
+            AND   deqs.statement_end_offset = ap.stmtend
         ) AS c
     ) AS ap
     WHERE ap.query_plan IS NOT NULL
@@ -2858,6 +2860,8 @@ BEGIN
                 deqs.statement_end_offset
             ) AS deps
             WHERE deqs.sql_handle = ap.sql_handle
+            AND   deqs.statement_start_offset = ap.stmtstart
+            AND   deqs.statement_end_offset = ap.stmtend
             AND   deps.dbid IN (ap.database_id, ap.currentdbid)
         ) AS c
     ) AS ap
