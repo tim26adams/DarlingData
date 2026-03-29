@@ -12,10 +12,10 @@
   <a href="https://github.com/erikdarlingdata/DarlingData/actions/workflows/sql-tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/erikdarlingdata/DarlingData/sql-tests.yml?style=for-the-badge&label=SQL%20Tests" alt="SQL Tests CI"></a>
 </p>
 <p align="center">
-  <a href="https://x.com/erikdarling"><img src="https://img.shields.io/badge/Follow_%40ErikDarling-black?style=for-the-badge&logo=x&logoColor=white" alt="Follow @ErikDarling on X"></a>
-  <a href="https://www.youtube.com/@erikaboringdata"><img src="https://img.shields.io/badge/YouTube-Subscribe-red?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube Subscribe"></a>
-  <a href="https://www.linkedin.com/in/erik-darling-83545913/"><img src="https://img.shields.io/badge/LinkedIn-Connect-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn Connect"></a>
-  <a href="https://www.erikdarlingdata.com"><img src="https://img.shields.io/badge/Blog-erikdarlingdata.com-FF6B35?style=for-the-badge&logo=wordpress&logoColor=white" alt="Blog"></a>
+  <a href="https://x.com/erikdarlingdata"><img src="https://img.shields.io/badge/Follow_%40ErikDarlingData-black?style=for-the-badge&logo=x&logoColor=white" alt="Follow @ErikDarlingData on X"></a>
+  <a href="https://www.youtube.com/@ErikDarlingData"><img src="https://img.shields.io/badge/YouTube-Subscribe-red?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube Subscribe"></a>
+  <a href="https://www.linkedin.com/in/erik-darling-data/"><img src="https://img.shields.io/badge/LinkedIn-Connect-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn Connect"></a>
+  <a href="https://erikdarling.com"><img src="https://img.shields.io/badge/Blog-erikdarling.com-FF6B35?style=for-the-badge&logo=wordpress&logoColor=white" alt="Blog"></a>
 </p>
 
 # Navigatory 
