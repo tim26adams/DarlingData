@@ -3968,7 +3968,9 @@ BEGIN
         total_memory_mb decimal(38, 6) NOT NULL,
         min_memory_mb decimal(38, 6) NULL,
         max_memory_mb decimal(38, 6) NULL,
-        max_dop bigint NULL
+        max_dop bigint NULL,
+        total_tempdb_mb decimal(38, 6) NOT NULL DEFAULT (0),
+        total_rows bigint NOT NULL DEFAULT (0)
     );
 
     CREATE TABLE
@@ -3999,7 +4001,11 @@ BEGIN
         avg_memory_mb decimal(38, 6) NULL,
         min_memory_mb decimal(38, 6) NULL,
         max_memory_mb decimal(38, 6) NULL,
-        max_dop bigint NULL
+        max_dop bigint NULL,
+        total_tempdb_mb decimal(38, 6) NOT NULL DEFAULT (0),
+        avg_tempdb_mb decimal(38, 6) NULL,
+        total_rows bigint NOT NULL DEFAULT (0),
+        avg_rows bigint NULL
     );
 
     CREATE TABLE
@@ -4103,8 +4109,18 @@ BEGIN
         writes_share decimal(5, 1) NULL,
         memory_share decimal(5, 1) NULL,
         executions_share decimal(5, 1) NULL,
+        tempdb_share decimal(5, 1) NULL,
+        rows_share decimal(5, 1) NULL,
         diagnostics nvarchar(4000) NULL,
-        volatile_metrics nvarchar(4000) NULL
+        volatile_metrics nvarchar(4000) NULL,
+        total_cpu_ms decimal(38, 6) NULL,
+        total_duration_ms decimal(38, 6) NULL,
+        total_physical_reads_mb decimal(38, 6) NULL,
+        total_writes_mb decimal(38, 6) NULL,
+        total_memory_mb decimal(38, 6) NULL,
+        total_tempdb_mb decimal(38, 6) NULL,
+        total_rows bigint NULL,
+        max_dop bigint NULL
     );
 
     /*Step 1a: Stage interval IDs for the time window*/
@@ -4225,7 +4241,18 @@ SELECT
     max_memory_mb =
         MAX(qsrs.max_query_max_used_memory * 8.0 / 1024.0),
     max_dop =
-        MAX(qsrs.max_dop)
+        MAX(qsrs.max_dop),' +
+    CASE
+        WHEN @new = 1
+        THEN N'
+    total_tempdb_mb =
+        SUM(qsrs.avg_tempdb_space_used * 8.0 / 1024.0 * qsrs.count_executions),'
+        ELSE N'
+    total_tempdb_mb =
+        CONVERT(decimal(38, 6), 0),'
+    END + N'
+    total_rows =
+        SUM(CONVERT(bigint, qsrs.avg_rowcount * qsrs.count_executions))
 FROM ' + @database_name_quoted + N'.sys.query_store_runtime_stats AS qsrs
 WHERE EXISTS
 (
@@ -4266,7 +4293,9 @@ OPTION(RECOMPILE, HASH JOIN);' + @nc10;
         total_memory_mb,
         min_memory_mb,
         max_memory_mb,
-        max_dop
+        max_dop,
+        total_tempdb_mb,
+        total_rows
     )
     EXECUTE sys.sp_executesql
         @sql;
@@ -4359,7 +4388,17 @@ SELECT
     max_memory_mb =
         MAX(ps.max_memory_mb),
     max_dop =
-        MAX(ps.max_dop)
+        MAX(ps.max_dop),
+    total_tempdb_mb =
+        SUM(ps.total_tempdb_mb),
+    avg_tempdb_mb =
+        SUM(ps.total_tempdb_mb) /
+        NULLIF(SUM(ps.total_executions), 0),
+    total_rows =
+        SUM(ps.total_rows),
+    avg_rows =
+        SUM(ps.total_rows) /
+        NULLIF(SUM(ps.total_executions), 0)
 FROM #hi_plan_stats AS ps
 JOIN ' + @database_name_quoted + N'.sys.query_store_plan AS qsp
     ON qsp.plan_id = ps.plan_id
@@ -4402,7 +4441,11 @@ OPTION(RECOMPILE);' + @nc10;
         avg_memory_mb,
         min_memory_mb,
         max_memory_mb,
-        max_dop
+        max_dop,
+        total_tempdb_mb,
+        avg_tempdb_mb,
+        total_rows,
+        avg_rows
     )
     EXECUTE sys.sp_executesql
         @sql;
@@ -4473,6 +4516,22 @@ OPTION(RECOMPILE);' + @nc10;
             qs.query_hash
         FROM #hi_query_stats AS qs
         ORDER BY qs.total_executions DESC
+
+        UNION
+
+        SELECT TOP (@top)
+            qs.query_hash
+        FROM #hi_query_stats AS qs
+        WHERE qs.total_tempdb_mb > 0
+        ORDER BY qs.total_tempdb_mb DESC
+
+        UNION
+
+        SELECT TOP (@top)
+            qs.query_hash
+        FROM #hi_query_stats AS qs
+        WHERE qs.total_rows > 0
+        ORDER BY qs.total_rows DESC
     ) AS qs;
 
     /*Step 3: Score with PERCENT_RANK (static SQL, SELECT INTO)*/
@@ -4508,6 +4567,16 @@ OPTION(RECOMPILE);' + @nc10;
                       SUM(CONVERT(float, qs.total_executions)) OVER () * 0.001
                  THEN PERCENT_RANK() OVER (ORDER BY qs.total_executions)
             END,
+        tempdb_pctl =
+            CASE WHEN qs.total_tempdb_mb >=
+                      SUM(qs.total_tempdb_mb) OVER () * 0.001
+                 THEN PERCENT_RANK() OVER (ORDER BY qs.total_tempdb_mb)
+            END,
+        rows_pctl =
+            CASE WHEN qs.total_rows >=
+                      SUM(CONVERT(float, qs.total_rows)) OVER () * 0.001
+                 THEN PERCENT_RANK() OVER (ORDER BY qs.total_rows)
+            END,
         cpu_share =
             CONVERT(decimal(5, 1), 100.0 * qs.total_cpu_ms /
             NULLIF(SUM(qs.total_cpu_ms) OVER (), 0)),
@@ -4529,6 +4598,16 @@ OPTION(RECOMPILE);' + @nc10;
                 decimal(5, 1),
                 100.0 * qs.total_executions /
                 NULLIF(SUM(CONVERT(float, qs.total_executions)) OVER (), 0)
+            ),
+        tempdb_share =
+            CONVERT(decimal(5, 1), 100.0 * qs.total_tempdb_mb /
+            NULLIF(SUM(qs.total_tempdb_mb) OVER (), 0)),
+        rows_share =
+            CONVERT
+            (
+                decimal(5, 1),
+                100.0 * qs.total_rows /
+                NULLIF(SUM(CONVERT(float, qs.total_rows)) OVER (), 0)
             )
     INTO #hi_scored
     FROM #hi_query_stats AS qs;
@@ -4950,7 +5029,7 @@ OPTION(RECOMPILE);' + @nc10;
                             N', ' +
                             ws2.wait_category_desc +
                             N' (' +
-                            CONVERT(nvarchar(20), CONVERT(integer, ws2.total_wait_ms)) +
+                            CONVERT(nvarchar(20), CONVERT(bigint, ws2.total_wait_ms)) +
                             N' ms)'
                         FROM #hi_wait_staging AS ws2
                         WHERE ws2.query_hash = ws.query_hash
@@ -5182,6 +5261,22 @@ OPTION(RECOMPILE);' + @nc10;
         FROM #hi_scored AS s
         JOIN #hi_interesting AS i
             ON s.query_hash = i.query_hash
+
+        UNION ALL
+
+        SELECT
+            pct = SUM(CONVERT(decimal(5, 1), s.tempdb_share))
+        FROM #hi_scored AS s
+        JOIN #hi_interesting AS i
+            ON s.query_hash = i.query_hash
+
+        UNION ALL
+
+        SELECT
+            pct = SUM(CONVERT(decimal(5, 1), s.rows_share))
+        FROM #hi_scored AS s
+        JOIN #hi_interesting AS i
+            ON s.query_hash = i.query_hash
     ) AS v (pct);
 
     SELECT
@@ -5285,6 +5380,38 @@ OPTION(RECOMPILE);' + @nc10;
                     0
                 )
             ),
+        top_n_tempdb_pct =
+            CONVERT
+            (
+                decimal(5, 1),
+                ISNULL
+                (
+                    (
+                        SELECT
+                            SUM(CONVERT(decimal(5, 1), s.tempdb_share))
+                        FROM #hi_scored AS s
+                        JOIN #hi_interesting AS i
+                            ON s.query_hash = i.query_hash
+                    ),
+                    0
+                )
+            ),
+        top_n_rows_pct =
+            CONVERT
+            (
+                decimal(5, 1),
+                ISNULL
+                (
+                    (
+                        SELECT
+                            SUM(CONVERT(decimal(5, 1), s.rows_share))
+                        FROM #hi_scored AS s
+                        JOIN #hi_interesting AS i
+                            ON s.query_hash = i.query_hash
+                    ),
+                    0
+                )
+            ),
         workload_profile =
             CASE
                 WHEN @hi_max_pct >= 50
@@ -5338,8 +5465,18 @@ OPTION(RECOMPILE);' + @nc10;
         writes_share,
         memory_share,
         executions_share,
+        tempdb_share,
+        rows_share,
         diagnostics,
-        volatile_metrics
+        volatile_metrics,
+        total_cpu_ms,
+        total_duration_ms,
+        total_physical_reads_mb,
+        total_writes_mb,
+        total_memory_mb,
+        total_tempdb_mb,
+        total_rows,
+        max_dop
     )
     SELECT
         pw.primary_window,
@@ -5366,7 +5503,9 @@ OPTION(RECOMPILE);' + @nc10;
                     ISNULL(s.reads_pctl, 0) +
                     ISNULL(s.writes_pctl, 0) +
                     ISNULL(s.memory_pctl, 0) +
-                    ISNULL(s.executions_pctl, 0)
+                    ISNULL(s.executions_pctl, 0) +
+                    ISNULL(s.tempdb_pctl, 0) +
+                    ISNULL(s.rows_pctl, 0)
                 ) /
                 NULLIF
                 (
@@ -5375,7 +5514,9 @@ OPTION(RECOMPILE);' + @nc10;
                     CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
                     CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
                     CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-                    CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
+                    CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.tempdb_pctl     IS NOT NULL THEN 1 ELSE 0 END +
+                    CASE WHEN s.rows_pctl       IS NOT NULL THEN 1 ELSE 0 END,
                     0
                 )
             ),
@@ -5387,7 +5528,9 @@ OPTION(RECOMPILE);' + @nc10;
                 ISNULL(N', ' + CASE WHEN s.reads_pctl      >= 0.80 THEN N'physical reads' END, N'') +
                 ISNULL(N', ' + CASE WHEN s.writes_pctl     >= 0.80 THEN N'writes' END, N'') +
                 ISNULL(N', ' + CASE WHEN s.memory_pctl     >= 0.80 THEN N'memory' END, N'') +
-                ISNULL(N', ' + CASE WHEN s.executions_pctl >= 0.80 THEN N'executions' END, N''),
+                ISNULL(N', ' + CASE WHEN s.executions_pctl >= 0.80 THEN N'executions' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.tempdb_pctl     >= 0.80 THEN N'tempdb' END, N'') +
+                ISNULL(N', ' + CASE WHEN s.rows_pctl       >= 0.80 THEN N'rows' END, N''),
                 1,
                 2,
                 N''
@@ -5400,6 +5543,8 @@ OPTION(RECOMPILE);' + @nc10;
         s.writes_share,
         s.memory_share,
         s.executions_share,
+        s.tempdb_share,
+        s.rows_share,
         diagnostics =
             STUFF
             (
@@ -5674,7 +5819,15 @@ OPTION(RECOMPILE);' + @nc10;
                 1,
                 2,
                 N''
-            )
+            ),
+        s.total_cpu_ms,
+        s.total_duration_ms,
+        s.total_physical_reads_mb,
+        s.total_writes_mb,
+        s.total_memory_mb,
+        s.total_tempdb_mb,
+        s.total_rows,
+        s.max_dop
     FROM #hi_scored AS s
     JOIN #hi_interesting AS i
         ON s.query_hash = i.query_hash
@@ -5694,7 +5847,9 @@ OPTION(RECOMPILE);' + @nc10;
             ISNULL(s.reads_pctl, 0) +
             ISNULL(s.writes_pctl, 0) +
             ISNULL(s.memory_pctl, 0) +
-            ISNULL(s.executions_pctl, 0)
+            ISNULL(s.executions_pctl, 0) +
+            ISNULL(s.tempdb_pctl, 0) +
+            ISNULL(s.rows_pctl, 0)
         ) /
         NULLIF
         (
@@ -5703,7 +5858,9 @@ OPTION(RECOMPILE);' + @nc10;
             CASE WHEN s.reads_pctl      IS NOT NULL THEN 1 ELSE 0 END +
             CASE WHEN s.writes_pctl     IS NOT NULL THEN 1 ELSE 0 END +
             CASE WHEN s.memory_pctl     IS NOT NULL THEN 1 ELSE 0 END +
-            CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END,
+            CASE WHEN s.executions_pctl IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.tempdb_pctl     IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN s.rows_pctl       IS NOT NULL THEN 1 ELSE 0 END,
             0
         ) >= 0.50;
 
@@ -5791,8 +5948,18 @@ SELECT
     o.writes_share,
     o.memory_share,
     o.executions_share,
+    o.tempdb_share,
+    o.rows_share,
     o.diagnostics,
-    o.volatile_metrics
+    o.volatile_metrics,
+    o.total_cpu_ms,
+    o.total_duration_ms,
+    o.total_physical_reads_mb,
+    o.total_writes_mb,
+    o.total_memory_mb,
+    o.total_tempdb_mb,
+    o.total_rows,
+    o.max_dop
 FROM #hi_output AS o
 OUTER APPLY
 (

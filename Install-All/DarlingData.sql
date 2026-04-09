@@ -43646,7 +43646,7 @@ OPTION(RECOMPILE);' + @nc10;
                             N', ' +
                             ws2.wait_category_desc +
                             N' (' +
-                            CONVERT(nvarchar(20), CONVERT(integer, ws2.total_wait_ms)) +
+                            CONVERT(nvarchar(20), CONVERT(bigint, ws2.total_wait_ms)) +
                             N' ms)'
                         FROM #hi_wait_staging AS ws2
                         WHERE ws2.query_hash = ws.query_hash
