@@ -10832,13 +10832,13 @@ SELECT
     total_query_wait_time_ms =
         SUM(qsws_with_lasts.total_query_wait_time_ms),
     avg_query_wait_time_ms =
-        SUM(qsws_with_lasts.avg_query_wait_time_ms),
+        AVG(qsws_with_lasts.avg_query_wait_time_ms),
     last_query_wait_time_ms =
         MAX(qsws_with_lasts.partitioned_last_query_wait_time_ms),
     min_query_wait_time_ms =
-        SUM(qsws_with_lasts.min_query_wait_time_ms),
+        MIN(qsws_with_lasts.min_query_wait_time_ms),
     max_query_wait_time_ms =
-        SUM(qsws_with_lasts.max_query_wait_time_ms)
+        MAX(qsws_with_lasts.max_query_wait_time_ms)
 FROM
 (
     SELECT
