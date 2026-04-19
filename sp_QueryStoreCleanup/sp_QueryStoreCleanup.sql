@@ -314,6 +314,25 @@ OPTION(RECOMPILE);';
     END;
 
     /*
+    Reject any state where Query Store cannot accept writes. sp_query_store_remove_query
+    modifies Query Store data; calling it against a READ_ONLY (1) or ERROR (3) database
+    fails once per target in the cursor, producing noisy error output and leaving the
+    caller with no useful result. Catch it up front instead. Only actual_state = 2
+    (READ_WRITE) is safe for cleanup.
+    */
+    IF @actual_state = 1
+    BEGIN
+        RAISERROR('Query Store is in READ_ONLY state for database %s. Writes are blocked, so cleanup cannot run. This is typically caused by hitting MAX_STORAGE_SIZE_MB or by an explicit READ_ONLY operation_mode.', 16, 1, @database_name) WITH NOWAIT;
+        RETURN;
+    END;
+
+    IF @actual_state = 3
+    BEGIN
+        RAISERROR('Query Store is in ERROR state for database %s. Cleanup cannot run until Query Store is recovered (see sys.database_query_store_options.readonly_reason).', 16, 1, @database_name) WITH NOWAIT;
+        RETURN;
+    END;
+
+    /*
     Parse @cleanup_targets
     */
     SELECT
