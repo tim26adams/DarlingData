@@ -1928,7 +1928,11 @@ SELECT
     query_text_pre = bd.value('(process/inputbuf/text())[1]', 'nvarchar(max)'),
     wait_time = bd.value('(process/@waittime)[1]', 'bigint'),
     transaction_name = bd.value('(process/@transactionname)[1]', 'nvarchar(1024)'),
-    last_transaction_started = bd.value('(process/@lasttranstarted)[1]', 'datetime2'),
+    /* lastbatchstarted matches the other three read sites for this column
+       (including the blocking-side read 120 lines below that UNION ALLs with
+       this row). Previously this site read @lasttranstarted, leaving the same
+       column holding two different attributes on blocked vs blocking rows. */
+    last_transaction_started = bd.value('(process/@lastbatchstarted)[1]', 'datetime2'),
     last_transaction_completed = bd.value('(process/@lastbatchcompleted)[1]', 'datetime2'),
     wait_resource = bd.value('(process/@waitresource)[1]', 'nvarchar(1024)'),
     lock_mode = bd.value('(process/@lockMode)[1]', 'nvarchar(10)'),
