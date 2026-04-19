@@ -3284,9 +3284,20 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     /* Resolve subset chains: if A -> B -> C, flatten so A -> C directly.
        Without this, includes from transitive subsets are lost because
        Rule 6 only collects includes from direct subsets of the final superset. */
+    /*
+    Flatten subset chains (A → B → C, so A → C) one hop at a time. Rule 3
+    only points at strictly wider indexes, which is a partial order, so a
+    cycle cannot form under current logic. Cap iterations anyway so a
+    future bug that introduces a cycle surfaces as a warning rather than
+    an infinite loop that eventually fills tempdb. A chain depth of 100
+    would require 100 distinct indexes on a single table in a prefix
+    supersession chain — not realistic in practice.
+    */
     DECLARE @chains_resolved bigint = 1;
+    DECLARE @chain_iterations integer = 0;
 
     WHILE @chains_resolved > 0
+    AND   @chain_iterations < 100
     BEGIN
         UPDATE
             ia1
@@ -3304,6 +3315,12 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         AND   ia1.target_index_name <> ia2.target_index_name;
 
         SET @chains_resolved = ROWCOUNT_BIG();
+        SET @chain_iterations += 1;
+    END;
+
+    IF @chain_iterations >= 100
+    BEGIN
+        RAISERROR('sp_IndexCleanup chain resolution hit the 100-iteration cap. This should never happen under the current rules; a cycle in target_index_name likely indicates a bug introduced by a later rule change. The recommendations below may be inconsistent — please investigate before running them.', 16, 1) WITH NOWAIT;
     END;
 
     IF @debug = 1
