@@ -40,6 +40,7 @@ ALTER PROCEDURE
     @dedupe_by varchar(50) = 'all',              /*deduplication strategy: all, query_hash, plan_hash, none*/
     @min_age_days integer = NULL,                /*only remove queries not executed in this many days*/
     @report_only bit = 0,                        /*1 = report what would be removed without removing*/
+    @pause_milliseconds integer = 0,             /*sleep this many ms between each remove to pace log writes on bulk purges; 0 = no sleep (default)*/
     @debug bit = 0,                              /*prints dynamic sql and diagnostics*/
     @help bit = 0,                               /*prints help information*/
     @version varchar(30) = NULL OUTPUT,          /*OUTPUT; for support*/
@@ -96,6 +97,8 @@ BEGIN
                     THEN 'only remove queries whose last execution is older than this many days; NULL = no age filter'
                     WHEN N'@report_only'
                     THEN 'report what would be removed without removing'
+                    WHEN N'@pause_milliseconds'
+                    THEN 'sleep this many ms between each sp_query_store_remove_query call so a bulk purge does not hammer the log; 0 = no sleep'
                     WHEN N'@debug'
                     THEN 'prints dynamic sql and diagnostics'
                     WHEN N'@help'
@@ -120,6 +123,8 @@ BEGIN
                     THEN 'any positive integer, e.g. 7, 30, 90'
                     WHEN N'@report_only'
                     THEN '0 or 1'
+                    WHEN N'@pause_milliseconds'
+                    THEN 'any non-negative integer, e.g. 25, 100, 500'
                     WHEN N'@debug'
                     THEN '0 or 1'
                     WHEN N'@help'
@@ -143,6 +148,8 @@ BEGIN
                     WHEN N'@min_age_days'
                     THEN 'NULL; no age filter'
                     WHEN N'@report_only'
+                    THEN '0'
+                    WHEN N'@pause_milliseconds'
                     THEN '0'
                     WHEN N'@debug'
                     THEN '0'
@@ -939,6 +946,35 @@ OPTION(RECOMPILE);';
     FROM @c
     INTO @query_id;
 
+    /*
+    Precompute the WAITFOR DELAY string once — WAITFOR's argument has to
+    be a varchar literal or variable, so we convert @pause_milliseconds
+    to hh:mm:ss.mmm format up front. Clamp to [0, 60000] to avoid
+    surprising 10-minute sleeps from a fat-finger and negative values
+    that would raise at the WAITFOR.
+    */
+    DECLARE
+        @pause_delay varchar(12) = N'';
+
+    IF @pause_milliseconds IS NOT NULL
+    AND @pause_milliseconds > 0
+    BEGIN
+        IF @pause_milliseconds > 60000
+        BEGIN
+            SELECT
+                @pause_milliseconds = 60000;
+        END;
+
+        SELECT
+            @pause_delay =
+                CONVERT
+                (
+                    varchar(12),
+                    DATEADD(MILLISECOND, @pause_milliseconds, CONVERT(time(3), '00:00:00')),
+                    114
+                );
+    END;
+
     WHILE @@FETCH_STATUS = 0
     BEGIN
         SELECT
@@ -962,6 +998,11 @@ OPTION(RECOMPILE);';
 
             RAISERROR('Query %I64d of %I64d: query_id %I64d not removed (%s)', 0, 1, @current, @total, @query_id, @error_message) WITH NOWAIT;
         END CATCH;
+
+        IF @pause_delay <> N''
+        BEGIN
+            WAITFOR DELAY @pause_delay;
+        END;
 
         FETCH NEXT
         FROM @c
