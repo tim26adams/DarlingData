@@ -1259,49 +1259,30 @@ AND   ca.utc_timestamp < @end_date';
                     SYSDATETIME()
                 );
 
-            /* Clean up each log table */
+            /*
+            Clean up each log table in batches of 10,000 rows. A single
+            unbatched DELETE against a long-installed instance that
+            hasn't been cleaned up will take a large transaction-log
+            hit and potentially escalate to table-level locking. The
+            WHILE loop keeps each transaction small and lets other
+            writers progress between batches. @@ROWCOUNT < 10000 is
+            the loop exit condition once the trailing batch finishes.
+            */
             SET @dsql = N'
-    DELETE FROM ' + @log_table_significant_waits + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_waits_by_count + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_waits_by_duration + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_io_issues + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_cpu_tasks + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_memory_conditions + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_memory_broker + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_memory_node_oom + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_system_health + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_scheduler_issues + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_severe_errors + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_pending_tasks + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_blocking + '
-    WHERE collection_time < @cleanup_date;
-
-    DELETE FROM ' + @log_table_deadlocks + '
-    WHERE collection_time < @cleanup_date;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_significant_waits + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_waits_by_count + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_waits_by_duration + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_io_issues + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_cpu_tasks + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_memory_conditions + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_memory_broker + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_memory_node_oom + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_system_health + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_scheduler_issues + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_severe_errors + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_pending_tasks + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_blocking + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
+    WHILE 1 = 1 BEGIN DELETE TOP (10000) FROM ' + @log_table_deadlocks + ' WHERE collection_time < @cleanup_date; IF @@ROWCOUNT < 10000 BREAK; END;
             ';
 
             IF @debug = 1
