@@ -1007,17 +1007,25 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     )
     SELECT
         check_id = 5103,
+        /*
+        Rate is deadlocks-per-day, computed from DATEDIFF(SECOND, ...) rather than
+        DATEDIFF(DAY, ...). The DAY-based version rounded sub-day uptime to 0 and
+        the NULLIF then collapsed the whole expression to NULL, which evaluated as
+        UNKNOWN in the WHERE below and silently skipped the deadlock check for the
+        first calendar-day-boundary of server uptime. SECOND-based rate keeps the
+        threshold semantics identical for any uptime ≥ 1 second.
+        */
         priority =
             CASE
                 WHEN
                 (
-                    1.0 *
-                    p.cntr_value /
+                    p.cntr_value *
+                    86400.0 /
                     NULLIF
                     (
                         DATEDIFF
                         (
-                            DAY,
+                            SECOND,
                             osi.sqlserver_start_time,
                             SYSDATETIME()
                         ),
@@ -1027,13 +1035,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 THEN 20 /* High: >100 deadlocks/day */
                 WHEN
                 (
-                    1.0 *
-                    p.cntr_value /
+                    p.cntr_value *
+                    86400.0 /
                     NULLIF
                     (
                         DATEDIFF
                         (
-                            DAY,
+                            SECOND,
                             osi.sqlserver_start_time,
                             SYSDATETIME()
                         ),
@@ -1074,13 +1082,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     AND   p.cntr_value > 0
     AND
     (
-        1.0 *
-        p.cntr_value /
+        p.cntr_value *
+        86400.0 /
         NULLIF
         (
             DATEDIFF
             (
-                DAY,
+                SECOND,
                 osi.sqlserver_start_time,
                 SYSDATETIME()
             ),
