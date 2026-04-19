@@ -435,15 +435,24 @@ AND   ca.utc_timestamp < @end_date';
     END;
     ELSE
     BEGIN
-        /* 2017+ handling */
+        /*
+        2017+ handling. Use the same half-open (>= @start_date AND
+        < @end_date) shape as the pre-2017 branch so an event captured
+        at exactly @end_date is not included on 2017+ while excluded
+        on pre-2017 — previously BETWEEN meant a closed interval on
+        2017+ and a row at the boundary could appear or not depending
+        on which branch ran.
+        */
         SET @cross_apply = N'CROSS APPLY xml.{object_name}.nodes(''/event'') AS e(x)';
 
         IF @timestamp_utc_mode = 1
             SET @time_filter = N'
-    AND   CONVERT(datetimeoffset(7), fx.timestamp_utc) BETWEEN @start_date AND @end_date';
+    AND   CONVERT(datetimeoffset(7), fx.timestamp_utc) >= @start_date
+    AND   CONVERT(datetimeoffset(7), fx.timestamp_utc) <  @end_date';
         ELSE
             SET @time_filter = N'
-    AND   fx.timestamp_utc BETWEEN @start_date AND @end_date';
+    AND   fx.timestamp_utc >= @start_date
+    AND   fx.timestamp_utc <  @end_date';
     END;
 
     SET @sql_template =
