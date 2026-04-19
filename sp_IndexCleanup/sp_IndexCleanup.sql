@@ -3069,6 +3069,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             AND   id.user_lookups = 0
             AND   id.is_primary_key = 0  /* Don't disable primary keys */
             AND   id.is_unique_constraint = 0  /* Don't disable unique constraints */
+            AND   id.is_unique = 0  /* Don't disable plain unique indexes — they enforce uniqueness even without a constraint */
             AND   id.is_eligible_for_dedupe = 1 /* Only eligible indexes */
         )
         AND #index_analysis.index_id <> 1 /* Don't disable clustered indexes */
@@ -3114,14 +3115,20 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       AND ia1.exact_match_hash = ia2.exact_match_hash  /* Exact match: keys + includes + filter */
     WHERE ia1.consolidation_rule IS NULL  /* Not already processed */
     AND   ia2.consolidation_rule IS NULL  /* Not already processed */
-    /* Exclude unique constraints - we'll handle those separately in Rule 7 */
+    /* Exclude unique constraints and primary keys on the loser (ia1) side.
+       Rule 2 is only allowed to DISABLE a regular nonclustered index — never
+       a PK or UC, both of which back FK referential integrity and cannot be
+       safely disabled. UCs are still processed as Rule 7.5 targets; PKs are
+       off-limits entirely for disabling. The opposite permutation of this
+       pair (with the PK as ia2, the keeper) still runs and correctly
+       disables the non-PK duplicate. */
     AND NOT EXISTS
     (
         SELECT
             1/0
-        FROM #index_details AS id1_uc
-        WHERE id1_uc.index_hash = ia1.index_hash
-        AND   id1_uc.is_unique_constraint = 1
+        FROM #index_details AS id1_pk
+        WHERE id1_pk.index_hash = ia1.index_hash
+        AND   (id1_pk.is_unique_constraint = 1 OR id1_pk.is_primary_key = 1)
     )
     AND NOT EXISTS
     (
@@ -3216,8 +3223,11 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       AND ia1.index_name <> ia2.index_name
       AND ia2.key_columns LIKE (REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ia1.key_columns, '~', '~~'), '[', '~['), ']', '~]'), '_', '~_'), '%', '~%') + N', %') ESCAPE '~'  /* ia2 has wider key that starts with ia1's key */
       AND ISNULL(ia1.filter_definition, '') = ISNULL(ia2.filter_definition, '')  /* Matching filters */
-      /* Exception: If narrower index is unique and wider is not, they should not be merged */
-      AND NOT (ia1.is_unique = 1 AND ia2.is_unique = 0)
+      /* Never disable a unique narrower index via supersession.
+         A unique index on (A) enforces "A is unique" — a wider index on
+         (A, B) only enforces "(A, B) is unique", which is a weaker guarantee.
+         This applies whether the wider index is unique or not. */
+      AND ia1.is_unique = 0
     WHERE ia1.consolidation_rule IS NULL  /* Not already processed */
     AND   ia2.consolidation_rule IS NULL  /* Not already processed */
     /* Don't disable unique constraints — but allow them as the wider (target) index */
@@ -3393,14 +3403,17 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       AND ISNULL(ia1.included_columns, '') <> ISNULL(ia2.included_columns, '')  /* Different includes */
     WHERE ia1.consolidation_rule IS NULL  /* Not already processed */
     AND   ia2.consolidation_rule IS NULL  /* Not already processed */
-    /* Exclude pairs where either one is a unique constraint (we'll handle those separately in Rule 7) */
+    /* Exclude unique constraints and primary keys on the loser (ia1) side.
+       Same reasoning as Rule 2: Rule 5 may only DISABLE a regular NC, not a
+       PK or UC whose index backs FK referential integrity. UCs are still
+       processed via Rule 7.5; PKs must never be disabled. */
     AND NOT EXISTS
     (
         SELECT
             1/0
-        FROM #index_details AS id1_uc
-        WHERE id1_uc.index_hash = ia1.index_hash
-        AND   id1_uc.is_unique_constraint = 1
+        FROM #index_details AS id1_pk
+        WHERE id1_pk.index_hash = ia1.index_hash
+        AND   (id1_pk.is_unique_constraint = 1 OR id1_pk.is_primary_key = 1)
     )
     AND NOT EXISTS
     (
@@ -3638,7 +3651,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         AND   id2.is_unique_constraint = 1
         AND NOT EXISTS
         (
-            /* Verify key columns match between index and unique constraint */
+            /* Verify key columns match between index and unique constraint.
+               Both directions of EXCEPT must be empty so the two key-column
+               sets are identical — otherwise an index with extra key columns
+               (e.g. NC (A,B,C) vs UC (A,B)) would be treated as equivalent
+               and the wider index would get promoted as a MAKE UNIQUE
+               replacement that cannot actually back the same FK references.
+            */
             SELECT
                 id2_inner.column_name
             FROM #index_details AS id2_inner
@@ -3652,6 +3671,22 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             FROM #index_details AS id1_inner
             WHERE id1_inner.index_hash = ia1.index_hash
             AND   id1_inner.is_included_column = 0
+        )
+        AND NOT EXISTS
+        (
+            SELECT
+                id1_inner.column_name
+            FROM #index_details AS id1_inner
+            WHERE id1_inner.index_hash = ia1.index_hash
+            AND   id1_inner.is_included_column = 0
+
+            EXCEPT
+
+            SELECT
+                id2_inner.column_name
+            FROM #index_details AS id2_inner
+            WHERE id2_inner.index_hash = id2.index_hash
+            AND   id2_inner.is_included_column = 0
         )
     )
     OPTION(RECOMPILE);
@@ -3681,6 +3716,21 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       ON  ia_nc.scope_hash = ia_uc.scope_hash  /* Same database and object */
       AND ia_nc.index_name <> ia_uc.index_name /* Different index */
       AND ia_uc.key_columns = ia_nc.key_columns  /* Verify key columns EXACT match */
+    WHERE NOT EXISTS
+    (
+        /* Don't propose replacing a unique constraint that backs an inbound
+           foreign key. Dropping it would be blocked by SQL Server, and
+           ALTER INDEX ... DISABLE on its backing index silently disables
+           every FK referencing it (leaving orphan rows possible). The user's
+           cleanup script would either error mid-execution or break
+           referential integrity without warning. */
+        SELECT
+            1/0
+        FROM #index_details AS id_fk
+        WHERE id_fk.index_hash = ia_uc.index_hash
+        AND   id_fk.is_foreign_key_reference = 1
+        AND   id_fk.is_included_column = 0
+    )
     OPTION(RECOMPILE);
 
     /* Second, mark nonclustered indexes to be made unique */
