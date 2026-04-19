@@ -2951,7 +2951,11 @@ AND   ca.utc_timestamp < @end_date';
         CROSS APPLY wi.sp_server_diagnostics_component_result.nodes('/event') AS w(x)
         WHERE w.x.exist('(data[@name="component"]/text[.= "QUERY_PROCESSING"])') = 1
         AND  (w.x.exist('(data[@name="state"]/text[.= "WARNING"])') = @warnings_only OR @warnings_only = 0)
-        AND  (w.x.exist('(/event/data[@name="data"]/value/queryProcessing/@pendingTasks[.>= sql:variable("@pending_task_threshold")])') = 1 OR @warnings_only = 0)
+        /* Threshold is honored whether or not @warnings_only is set — the
+           parameter documents "minimum pending tasks to display" and the
+           previous `OR @warnings_only = 0` short-circuit silently ignored
+           the user-supplied value whenever warnings-only was off. */
+        AND   w.x.exist('(/event/data[@name="data"]/value/queryProcessing/@pendingTasks[.>= sql:variable("@pending_task_threshold")])') = 1
         OPTION(RECOMPILE, MAXDOP 1);
 
         IF @debug = 1
@@ -3176,7 +3180,10 @@ AND   ca.utc_timestamp < @end_date';
         INTO #pending_task_details
         FROM #sp_server_diagnostics_component_result AS wi
         CROSS APPLY wi.sp_server_diagnostics_component_result.nodes('/event') AS w(x)
-        CROSS APPLY w.x.nodes('/event/data[@name="data"]/value/queryProcessing[@pendingTasks > 1]/pendingTasks/entryPoint') AS ep(e)
+        /* Hardcoded threshold > 1 ignored the @pending_task_threshold
+           parameter. Replaced with sql:variable() binding so the user's
+           value actually takes effect here too. */
+        CROSS APPLY w.x.nodes('/event/data[@name="data"]/value/queryProcessing[@pendingTasks >= sql:variable("@pending_task_threshold")]/pendingTasks/entryPoint') AS ep(e)
         WHERE w.x.exist('(data[@name="component"]/text[.= "QUERY_PROCESSING"])') = 1
         AND  (w.x.exist('(data[@name="state"]/text[.= "WARNING"])') = @warnings_only OR @warnings_only = 0)
         OPTION(RECOMPILE, MAXDOP 1);
