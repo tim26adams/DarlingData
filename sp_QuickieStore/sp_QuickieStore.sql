@@ -10863,15 +10863,24 @@ FROM
     FROM #query_store_runtime_stats AS qsrs
     CROSS APPLY
     (
-        SELECT TOP (5)
+        /*
+        Pull every wait category captured for this (interval, plan).
+        The previous TOP (5) ORDER BY avg_query_wait_time_ms DESC here
+        dropped wait categories ranked 6+ per interval before the outer
+        GROUP BY ran, so a category that was (say) 6th worst in one
+        interval but 2nd worst in another would silently have the first
+        interval''s contribution missing from its totals. The outer
+        aggregation groups by (plan_id, wait_category_desc) and the
+        number of wait categories per interval is capped by QS at a
+        small set, so removing the TOP does not explode row counts.
+        */
+        SELECT
             qsws.*
         FROM ' + @database_name_quoted + N'.sys.query_store_wait_stats AS qsws
         WHERE qsws.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
         AND   qsws.plan_id = qsrs.plan_id
         AND   qsws.wait_category > 0
         AND   qsws.min_query_wait_time_ms > 0
-        ORDER BY
-            qsws.avg_query_wait_time_ms DESC
     ) AS qsws
     WHERE qsrs.database_id = @database_id
 ) AS qsws_with_lasts
