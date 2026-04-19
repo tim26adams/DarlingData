@@ -4831,7 +4831,22 @@ BEGIN
 
     SET @executer = QUOTENAME(@output_database_name) + N'.sys.sp_executesql ';
 
-    /*Clean up sessions*/
+    /*
+    Clean up sessions. Match only what sp_HumanEvents itself creates:
+      HumanEvents_<event_type>_<guid>  (one-shot, @keep_alive = 0)
+      keeper_HumanEvents_<event_type>  (@keep_alive = 1)
+
+    Previous pattern N'%HumanEvents_%' had two issues:
+      - unanchored leading % — a user session named "MyHumanEventsFoo"
+        would match and get dropped.
+      - unescaped _ — LIKE treats _ as a single-char wildcard, so
+        "HumanEventsMonitor" (no literal underscore) would match via the
+        trailing % + the _ wildcard eating any one character.
+
+    Anchored to the prefix and escaped the literal underscore with a
+    bracket class so an operator using HumanEvents-adjacent names for
+    their own XE sessions isn't collateral damage.
+    */
     IF @azure = 0
     BEGIN
         SELECT
@@ -4843,7 +4858,8 @@ BEGIN
         FROM sys.server_event_sessions AS ses
         LEFT JOIN sys.dm_xe_sessions AS dxs
           ON dxs.name = ses.name
-        WHERE ses.name LIKE N'%HumanEvents_%';
+        WHERE ses.name LIKE N'HumanEvents[_]%'
+        OR    ses.name LIKE N'keeper[_]HumanEvents[_]%';
     END;
     ELSE
     BEGIN
@@ -4856,7 +4872,8 @@ BEGIN
         FROM sys.database_event_sessions AS ses
         LEFT JOIN sys.dm_xe_database_sessions AS dxs
           ON dxs.name = ses.name
-        WHERE ses.name LIKE N'%HumanEvents_%';
+        WHERE ses.name LIKE N'HumanEvents[_]%'
+        OR    ses.name LIKE N'keeper[_]HumanEvents[_]%';
     END;
 
     EXECUTE sys.sp_executesql
