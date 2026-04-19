@@ -3217,8 +3217,11 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       AND ia1.index_name <> ia2.index_name
       AND ia2.key_columns LIKE (REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ia1.key_columns, '~', '~~'), '[', '~['), ']', '~]'), '_', '~_'), '%', '~%') + N', %') ESCAPE '~'  /* ia2 has wider key that starts with ia1's key */
       AND ISNULL(ia1.filter_definition, '') = ISNULL(ia2.filter_definition, '')  /* Matching filters */
-      /* Exception: If narrower index is unique and wider is not, they should not be merged */
-      AND NOT (ia1.is_unique = 1 AND ia2.is_unique = 0)
+      /* Never disable a unique narrower index via supersession.
+         A unique index on (A) enforces "A is unique" — a wider index on
+         (A, B) only enforces "(A, B) is unique", which is a weaker guarantee.
+         This applies whether the wider index is unique or not. */
+      AND ia1.is_unique = 0
     WHERE ia1.consolidation_rule IS NULL  /* Not already processed */
     AND   ia2.consolidation_rule IS NULL  /* Not already processed */
     /* Don't disable unique constraints — but allow them as the wider (target) index */
