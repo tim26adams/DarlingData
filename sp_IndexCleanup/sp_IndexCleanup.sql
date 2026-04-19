@@ -3069,6 +3069,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             AND   id.user_lookups = 0
             AND   id.is_primary_key = 0  /* Don't disable primary keys */
             AND   id.is_unique_constraint = 0  /* Don't disable unique constraints */
+            AND   id.is_unique = 0  /* Don't disable plain unique indexes — they enforce uniqueness even without a constraint */
             AND   id.is_eligible_for_dedupe = 1 /* Only eligible indexes */
         )
         AND #index_analysis.index_id <> 1 /* Don't disable clustered indexes */
@@ -3638,7 +3639,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         AND   id2.is_unique_constraint = 1
         AND NOT EXISTS
         (
-            /* Verify key columns match between index and unique constraint */
+            /* Verify key columns match between index and unique constraint.
+               Both directions of EXCEPT must be empty so the two key-column
+               sets are identical — otherwise an index with extra key columns
+               (e.g. NC (A,B,C) vs UC (A,B)) would be treated as equivalent
+               and the wider index would get promoted as a MAKE UNIQUE
+               replacement that cannot actually back the same FK references.
+            */
             SELECT
                 id2_inner.column_name
             FROM #index_details AS id2_inner
@@ -3652,6 +3659,22 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             FROM #index_details AS id1_inner
             WHERE id1_inner.index_hash = ia1.index_hash
             AND   id1_inner.is_included_column = 0
+        )
+        AND NOT EXISTS
+        (
+            SELECT
+                id1_inner.column_name
+            FROM #index_details AS id1_inner
+            WHERE id1_inner.index_hash = ia1.index_hash
+            AND   id1_inner.is_included_column = 0
+
+            EXCEPT
+
+            SELECT
+                id2_inner.column_name
+            FROM #index_details AS id2_inner
+            WHERE id2_inner.index_hash = id2.index_hash
+            AND   id2_inner.is_included_column = 0
         )
     )
     OPTION(RECOMPILE);
