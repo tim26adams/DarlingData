@@ -2189,6 +2189,15 @@ WITH
     JOIN #blocking AS bg
       ON  bg.monitor_loop = h.monitor_loop
       AND bg.blocking_desc = h.blocked_desc
+    /*
+    Cycle guard: skip a row whose blocked_desc already appears in the
+    accumulated sort_order. Two sessions can briefly appear to block each
+    other in the same monitor_loop (before the deadlock monitor fires),
+    and without a guard the recursion has no exit. The sort_order string
+    contains every (SPID:ECID) we've visited on this branch; checking for
+    the candidate blocked_desc before we follow it prevents the cycle.
+    */
+    WHERE h.sort_order NOT LIKE '%' + bg.blocked_desc + '%'
 )
 UPDATE
     #blocked
@@ -2200,7 +2209,13 @@ JOIN hierarchy AS h
   ON  h.monitor_loop = b.monitor_loop
   AND h.blocking_desc = b.blocking_desc
   AND h.blocked_desc = b.blocked_desc
-OPTION(RECOMPILE, MAXRECURSION 0);
+/*
+MAXRECURSION 100 (the default) is plenty for real blocking chains and
+still acts as a backstop if the cycle guard above is ever bypassed by
+a blocked_desc that doesn't format the same way as expected. Reverted
+from MAXRECURSION 0 which gave the runaway case no ceiling at all.
+*/
+OPTION(RECOMPILE, MAXRECURSION 100);
 
 IF @debug = 1
 BEGIN
