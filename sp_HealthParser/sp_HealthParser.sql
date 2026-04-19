@@ -2199,7 +2199,21 @@ AND   ca.utc_timestamp < @end_date';
                 ),
             tc.wait_type,
             waits = SUM(CONVERT(bigint, tc.waits)),
-            average_wait_time_ms = CONVERT(bigint, AVG(tc.average_wait_time_ms)),
+            /*
+            Weighted average rather than AVG(avg): tc.average_wait_time_ms
+            is already a per-event average, so AVG() over the bucket was
+            an unweighted mean of means — events with one wait got the
+            same pull on the output as events with thousands. Weight by
+            waits to get the true bucket-scoped average. NULLIF keeps us
+            safe if every contributing row had waits = 0.
+            */
+            average_wait_time_ms =
+                CONVERT
+                (
+                    bigint,
+                    SUM(CONVERT(decimal(38, 2), tc.average_wait_time_ms) * CONVERT(decimal(38, 2), tc.waits))
+                  / NULLIF(SUM(CONVERT(decimal(38, 2), tc.waits)), 0)
+                ),
             max_wait_time_ms = CONVERT(bigint, MAX(tc.max_wait_time_ms))
         INTO #tc
         FROM #topwaits_count AS tc
