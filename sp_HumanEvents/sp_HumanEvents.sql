@@ -1478,54 +1478,62 @@ BEGIN
             GROUP BY
                 maps.rn
     )
+    /*
+    Build the wait_type filter as the full nvarchar(max) FOR XML
+    concatenation. Previously wrapped in SUBSTRING(..., 0, 8000), which
+    has two problems:
+      - SUBSTRING(x, 0, N) returns N-1 chars (the 0-start offset eats
+        one position). The cap was actually 7,999 chars, not 8,000.
+      - @wait_type_filter is nvarchar(max); capping at ~8k bytes is
+        arbitrary. With @wait_type = 'all' the predicate can grow past
+        that and the trailing closing paren appended below was being
+        tacked onto a mid-expression truncation — producing an invalid
+        XE session filter.
+    No cap needed; let the full predicate through.
+    */
     SELECT
         @wait_type_filter +=
-            SUBSTRING
             (
-                (
-                    SELECT
-                        N'      AND  ((' +
-                        STUFF
+                SELECT
+                    N'      AND  ((' +
+                    STUFF
+                    (
                         (
-                            (
-                                SELECT
-                                    N'         OR ' +
-                                    CASE
-                                        WHEN grps.minkey < grps.maxkey
-                                        THEN +
-                                        N'(wait_type >= ' +
-                                        CONVERT
-                                        (
-                                            nvarchar(11),
-                                            grps.minkey
-                                        ) +
-                                        N' AND wait_type <= ' +
-                                        CONVERT
-                                        (
-                                            nvarchar(11),
-                                            grps.maxkey
-                                        ) +
-                                        N')' +
-                                        @nc10
-                                        ELSE N'(wait_type = ' +
-                                        CONVERT
-                                        (
-                                            nvarchar(11),
-                                            grps.minkey
-                                        ) +
-                                        N')' +
-                                        @nc10
-                                    END
-                                FROM grps FOR XML PATH(N''), TYPE
-                            ).value('./text()[1]', 'nvarchar(max)')
-                            ,
-                            1,
-                            13,
-                            N''
-                        )
-                ),
-                0,
-                8000
+                            SELECT
+                                N'         OR ' +
+                                CASE
+                                    WHEN grps.minkey < grps.maxkey
+                                    THEN +
+                                    N'(wait_type >= ' +
+                                    CONVERT
+                                    (
+                                        nvarchar(11),
+                                        grps.minkey
+                                    ) +
+                                    N' AND wait_type <= ' +
+                                    CONVERT
+                                    (
+                                        nvarchar(11),
+                                        grps.maxkey
+                                    ) +
+                                    N')' +
+                                    @nc10
+                                    ELSE N'(wait_type = ' +
+                                    CONVERT
+                                    (
+                                        nvarchar(11),
+                                        grps.minkey
+                                    ) +
+                                    N')' +
+                                    @nc10
+                                END
+                            FROM grps FOR XML PATH(N''), TYPE
+                        ).value('./text()[1]', 'nvarchar(max)')
+                        ,
+                        1,
+                        13,
+                        N''
+                    )
             ) +
             N')';
 END;
