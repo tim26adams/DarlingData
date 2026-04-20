@@ -2246,7 +2246,14 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         FROM sys.dm_os_memory_clerks AS domc
         WHERE domc.type = N'MEMORYCLERK_SQLBUFFERPOOL';
 
-        /* Get stolen memory */
+        /* Get stolen memory.
+           Anchored both object_name (LIKE %Memory Manager% to cover
+           both default and named-instance prefixes like
+           "SQLServer:Memory Manager" and "MSSQL$INST:Memory Manager")
+           and counter_name (exact match). Previous filter was a loose
+           LIKE N'Stolen Server%' that relied on the counter name being
+           globally unique; fine today but would silently drift if a
+           future build adds another prefix-matching counter. */
         SELECT
             @stolen_memory_gb =
                 CONVERT
@@ -2255,7 +2262,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                     dopc.cntr_value / 1024.0 / 1024.0
                 )
         FROM sys.dm_os_performance_counters AS dopc
-        WHERE dopc.counter_name LIKE N'Stolen Server%';
+        WHERE RTRIM(dopc.object_name) LIKE N'%Memory Manager%'
+        AND   RTRIM(dopc.counter_name) = N'Stolen Server Memory (KB)';
 
         /* Calculate stolen memory percentage */
         IF @buffer_pool_size_gb > 0
