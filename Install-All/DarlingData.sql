@@ -1,4 +1,4 @@
--- Compile Date: 04/20/2026 15:53:58 UTC
+-- Compile Date: 04/20/2026 21:53:32 UTC
 SET ANSI_NULLS ON;
 SET ANSI_PADDING ON;
 SET ANSI_WARNINGS ON;
@@ -33002,6 +33002,7 @@ ALTER PROCEDURE
     @procedure_name sysname = NULL, /*the name of the programmable object you're searching for*/
     @query_text_search nvarchar(4000) = NULL, /*query text to search for*/
     @query_text_search_not nvarchar(4000) = NULL, /*query text to exclude*/
+    @query_plan_xml xml = NULL, /*a single query plan XML to process directly, bypassing Query Store*/
     @help bit = 0, /*return available parameter details, etc.*/
     @debug bit = 0, /*prints dynamic sql, statement length, parameter and variable values, and raw temp table contents*/
     @version varchar(30) = NULL OUTPUT, /*OUTPUT; for support*/
@@ -33055,6 +33056,7 @@ BEGIN
                 WHEN N'@procedure_name' THEN 'the name of the programmable object you''re searching for'
                 WHEN N'@query_text_search' THEN 'query text to search for'
                 WHEN N'@query_text_search_not' THEN 'query text to exclude'
+                WHEN N'@query_plan_xml' THEN 'a single query plan XML to process directly, bypassing Query Store'
                 WHEN N'@help' THEN 'how you got here'
                 WHEN N'@debug' THEN 'prints dynamic sql, statement length, parameter and variable values'
                 WHEN N'@version' THEN 'OUTPUT; for support'
@@ -33075,6 +33077,7 @@ BEGIN
                 WHEN N'@procedure_name' THEN 'a valid programmable object in your database'
                 WHEN N'@query_text_search' THEN 'a string; leading and trailing wildcards will be added if missing'
                 WHEN N'@query_text_search_not' THEN 'a string; leading and trailing wildcards will be added if missing'
+                WHEN N'@query_plan_xml' THEN 'a valid ShowPlanXML document; when supplied, all Query Store filters are ignored'
                 WHEN N'@help' THEN '0 or 1'
                 WHEN N'@debug' THEN '0 or 1'
                 WHEN N'@version' THEN 'none; OUTPUT'
@@ -33095,6 +33098,7 @@ BEGIN
                 WHEN N'@procedure_name' THEN 'NULL'
                 WHEN N'@query_text_search' THEN 'NULL'
                 WHEN N'@query_text_search_not' THEN 'NULL'
+                WHEN N'@query_plan_xml' THEN 'NULL'
                 WHEN N'@help' THEN '0'
                 WHEN N'@debug' THEN '0'
                 WHEN N'@version' THEN 'none; OUTPUT'
@@ -33181,12 +33185,13 @@ SELECT
             )
         );
 
-/*Check if database exists*/
-IF
-(
-    @database_id IS NULL
- OR @collation IS NULL
-)
+/*Check if database exists (skipped when @query_plan_xml is supplied)*/
+IF  @query_plan_xml IS NULL
+AND
+    (
+        @database_id IS NULL
+     OR @collation IS NULL
+    )
 BEGIN
     RAISERROR('Database %s does not exist', 10, 1, @database_name) WITH NOWAIT;
     RETURN;
@@ -33273,44 +33278,47 @@ WHERE ao.name IN
       )
 OPTION(RECOMPILE);
 
-/*Check database state*/
-SELECT
-    @sql += N'
-SELECT
-    @query_store_exists =
-        CASE
-            WHEN EXISTS
-                 (
-                     SELECT
-                         1/0
-                     FROM ' + @database_name_quoted + N'.sys.database_query_store_options AS dqso
-                     WHERE
-                     (
-                          dqso.actual_state = 0
-                       OR dqso.actual_state IS NULL
-                     )
-                 )
-            OR   NOT EXISTS
-                 (
-                     SELECT
-                         1/0
-                     FROM ' + @database_name_quoted + N'.sys.database_query_store_options AS dqso
-                 )
-            THEN 0
-            ELSE 1
-        END
-OPTION(RECOMPILE);
-';
-
-EXECUTE sys.sp_executesql
-    @sql,
-  N'@query_store_exists bit OUTPUT',
-    @query_store_exists OUTPUT;
-
-IF @query_store_exists = 0
+/*Check database state (skipped when @query_plan_xml is supplied)*/
+IF @query_plan_xml IS NULL
 BEGIN
-    RAISERROR('Query Store doesn''t seem to be enabled for database: %s', 10, 1, @database_name) WITH NOWAIT;
-    RETURN;
+    SELECT
+        @sql += N'
+    SELECT
+        @query_store_exists =
+            CASE
+                WHEN EXISTS
+                     (
+                         SELECT
+                             1/0
+                         FROM ' + @database_name_quoted + N'.sys.database_query_store_options AS dqso
+                         WHERE
+                         (
+                              dqso.actual_state = 0
+                           OR dqso.actual_state IS NULL
+                         )
+                     )
+                OR   NOT EXISTS
+                     (
+                         SELECT
+                             1/0
+                         FROM ' + @database_name_quoted + N'.sys.database_query_store_options AS dqso
+                     )
+                THEN 0
+                ELSE 1
+            END
+    OPTION(RECOMPILE);
+    ';
+
+    EXECUTE sys.sp_executesql
+        @sql,
+      N'@query_store_exists bit OUTPUT',
+        @query_store_exists OUTPUT;
+
+    IF @query_store_exists = 0
+    BEGIN
+        RAISERROR('Query Store doesn''t seem to be enabled for database: %s', 10, 1, @database_name) WITH NOWAIT;
+        RETURN;
+    END;
 END;
 
 /*
@@ -34026,8 +34034,277 @@ CREATE TABLE
 );
 
 /*
-Populate filter temp tables using XML-based string splitting for compatibility
+If @query_plan_xml was supplied, seed the repro pipeline with one synthetic
+plan so the parser, warnings, and repro-builder can all run without Query
+Store. Synthetic ids are -1 so they can't collide with real Query Store ids.
+The Query Store population region below is gated on @query_plan_xml IS NULL
+and is skipped entirely in this mode.
 */
+IF @query_plan_xml IS NOT NULL
+BEGIN
+    DECLARE
+        @synthetic_plan_id bigint = -1,
+        @synthetic_query_id bigint = -1,
+        @synthetic_query_text_id bigint = -1,
+        @synthetic_context_settings_id bigint = -1,
+        @synthetic_database_id integer = ISNULL(@database_id, -1),
+        @synthetic_now datetimeoffset(7) = SYSDATETIMEOFFSET(),
+        @synthetic_query_text nvarchar(max);
+
+    /*Extract the first StmtSimple statement text from the plan XML*/
+    SELECT
+        @synthetic_query_text =
+            @query_plan_xml.value
+            (
+                N'declare default element namespace "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
+                  (//StmtSimple/@StatementText)[1]',
+                N'nvarchar(max)'
+            );
+
+    INSERT
+        #query_store_plan
+    (
+        database_id,
+        plan_id,
+        query_id,
+        all_plan_ids,
+        plan_group_id,
+        engine_version,
+        compatibility_level,
+        query_plan_hash,
+        query_plan,
+        is_online_index_plan,
+        is_trivial_plan,
+        is_parallel_plan,
+        is_forced_plan,
+        is_natively_compiled,
+        force_failure_count,
+        last_force_failure_reason_desc,
+        count_compiles,
+        initial_compile_start_time,
+        last_compile_start_time,
+        last_execution_time,
+        avg_compile_duration_ms,
+        last_compile_duration_ms,
+        plan_forcing_type_desc,
+        has_compile_replay_script,
+        is_optimized_plan_forcing_disabled,
+        plan_type_desc
+    )
+    VALUES
+    (
+        @synthetic_database_id,
+        @synthetic_plan_id,
+        @synthetic_query_id,
+        CONVERT(varchar(max), @synthetic_plan_id),
+        NULL,
+        NULL,
+        160,
+        0x0000000000000000,
+        CONVERT(nvarchar(max), @query_plan_xml),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        NULL,
+        1,
+        @synthetic_now,
+        @synthetic_now,
+        @synthetic_now,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+    );
+
+    INSERT
+        #query_store_query
+    (
+        database_id,
+        query_id,
+        query_text_id,
+        context_settings_id,
+        object_id,
+        query_hash,
+        initial_compile_start_time,
+        last_compile_start_time,
+        last_execution_time
+    )
+    VALUES
+    (
+        @synthetic_database_id,
+        @synthetic_query_id,
+        @synthetic_query_text_id,
+        @synthetic_context_settings_id,
+        NULL,
+        0x0000000000000000,
+        @synthetic_now,
+        @synthetic_now,
+        @synthetic_now
+    );
+
+    INSERT
+        #query_store_query_text
+    (
+        database_id,
+        query_text_id,
+        query_sql_text,
+        statement_sql_handle,
+        is_part_of_encrypted_module,
+        has_restricted_text
+    )
+    VALUES
+    (
+        @synthetic_database_id,
+        @synthetic_query_text_id,
+        @synthetic_query_text,
+        NULL,
+        0,
+        0
+    );
+
+    INSERT
+        #query_context_settings
+    (
+        database_id,
+        context_settings_id,
+        set_options,
+        language_id,
+        date_format,
+        date_first,
+        status,
+        required_cursor_options,
+        acceptable_cursor_options,
+        merge_action_type,
+        default_schema_id,
+        is_replication_specific,
+        is_contained
+    )
+    VALUES
+    (
+        @synthetic_database_id,
+        @synthetic_context_settings_id,
+        NULL,
+        0,
+        0,
+        7,
+        NULL,
+        0,
+        0,
+        0,
+        1,
+        0,
+        NULL
+    );
+
+    INSERT
+        #query_store_runtime_stats
+    (
+        database_id,
+        runtime_stats_id,
+        plan_id,
+        runtime_stats_interval_id,
+        execution_type_desc,
+        first_execution_time,
+        last_execution_time,
+        count_executions,
+        avg_duration_ms,
+        last_duration_ms,
+        min_duration_ms,
+        max_duration_ms,
+        avg_cpu_time_ms,
+        last_cpu_time_ms,
+        min_cpu_time_ms,
+        max_cpu_time_ms,
+        avg_logical_io_reads_mb,
+        last_logical_io_reads_mb,
+        min_logical_io_reads_mb,
+        max_logical_io_reads_mb,
+        avg_logical_io_writes_mb,
+        last_logical_io_writes_mb,
+        min_logical_io_writes_mb,
+        max_logical_io_writes_mb,
+        avg_physical_io_reads_mb,
+        last_physical_io_reads_mb,
+        min_physical_io_reads_mb,
+        max_physical_io_reads_mb,
+        avg_clr_time_ms,
+        last_clr_time_ms,
+        min_clr_time_ms,
+        max_clr_time_ms,
+        last_dop,
+        min_dop,
+        max_dop,
+        avg_query_max_used_memory_mb,
+        last_query_max_used_memory_mb,
+        min_query_max_used_memory_mb,
+        max_query_max_used_memory_mb,
+        avg_rowcount,
+        last_rowcount,
+        min_rowcount,
+        max_rowcount,
+        context_settings
+    )
+    VALUES
+    (
+        @synthetic_database_id,
+        -1,
+        @synthetic_plan_id,
+        -1,
+        N'Regular',
+        @synthetic_now,
+        @synthetic_now,
+        1,
+        0.0,
+        0,
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0.0,
+        0,
+        0,
+        0,
+        0.0,
+        0,
+        0,
+        0,
+        NULL
+    );
+END;
+
+/*
+Populate filter temp tables using XML-based string splitting for compatibility
+(skipped when @query_plan_xml is supplied — synthetic rows were seeded above)
+*/
+IF @query_plan_xml IS NULL
+BEGIN
+
 IF @include_plan_ids IS NOT NULL
 BEGIN
     SELECT
@@ -35841,6 +36118,8 @@ OPTION(RECOMPILE);' + @nc10;
         @database_id;
 END;
 
+END; /*end of @query_plan_xml IS NULL Query Store population gate*/
+
 /*
 Extract parameters from query plans
 Uses substring extraction for performance,
@@ -36403,6 +36682,7 @@ SELECT
                 NCHAR(10) +
                 CASE
                     WHEN @azure = 0
+                    AND  @database_name IS NOT NULL
                     THEN
                         N'USE ' +
                         QUOTENAME(@database_name) +
