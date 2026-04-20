@@ -4307,12 +4307,20 @@ END;
 
 /*
 See if our cool new 2022 views exist.
-May have to tweak this if views aren't present in some cloudy situations.
+
+Threshold is >= 4 rather than = 5 because query_store_replicas is
+the one view in this set that standard Azure SQL Database tiers can
+be missing (replicas are managed differently there). The other four
+are what the sproc actually uses for hints, feedback, and variants,
+and those work fine on Azure SQL DB. Requiring all 5 would disable
+every 2022-era feature on DBs that are legitimately 2022-class.
+4 of 5 plus the rest being older builds is not a realistic shape —
+pre-2022 servers have 0 or 1 of these views, not 4.
 */
 SELECT
     @sql_2022_views =
         CASE
-            WHEN COUNT_BIG(*) = 5
+            WHEN COUNT_BIG(*) >= 4
             THEN 1
             ELSE 0
         END
