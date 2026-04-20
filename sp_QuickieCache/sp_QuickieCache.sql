@@ -429,6 +429,12 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         AND   (@ignore_system_databases = 0 OR ISNULL(CONVERT(integer, pa.value), 0) NOT IN (1, 2, 3, 4))
         AND   ISNULL(CONVERT(integer, pa.value), 0) < 32761
         AND   (@database_id IS NULL OR CONVERT(integer, pa.value) = @database_id)
+        /* Honor @start_date / @end_date the same as the statement /
+           procedure / function / trigger paths below — the filters
+           were documented as applying to all modes, but this
+           @find_single_use_plans branch silently ignored them before. */
+        AND   (@start_date IS NULL OR qs.creation_time >= @start_date)
+        AND   (@end_date   IS NULL OR qs.creation_time <  @end_date)
         ORDER BY
             cp.size_in_bytes DESC
         OPTION(RECOMPILE, MAXDOP 1);
