@@ -2454,7 +2454,7 @@ SET
         N'database: ' +
         ISNULL(b.database_name, N'unknown') +
         N' object_id: ' +
-        ISNULL(RTRIM(b.object_id), N'unknown')
+        ISNULL(CONVERT(nvarchar(20), b.object_id), N'unknown')
     )
 FROM #blocks AS b
 CROSS APPLY
