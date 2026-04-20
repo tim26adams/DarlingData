@@ -1227,7 +1227,7 @@ BEGIN
         RAISERROR('Inserting to #sp_server_diagnostics_component_result for target type: %s and system health: %s', 0, 1, @target_type, @is_system_health_msg) WITH NOWAIT;
     END;
 
-    IF @target_type = N'ring_buffer'
+    IF LOWER(@target_type) = N'ring_buffer'
     BEGIN
         INSERT
             #sp_server_diagnostics_component_result
