@@ -4559,6 +4559,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                     (@current_database_id, @current_database_name, 10, N''TSQL_SCALAR_UDF_INLINING'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 13, N''OPTIMIZE_FOR_AD_HOC_WORKLOADS'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 16, N''ROW_MODE_MEMORY_GRANT_FEEDBACK'', NULL, NULL, 1),
+                    (@current_database_id, @current_database_name, 17, N''ISOLATE_SECURITY_POLICY_CARDINALITY'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 18, N''BATCH_MODE_ON_ROWSTORE'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 19, N''DEFERRED_COMPILATION_TV'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 20, N''ACCELERATED_PLAN_FORCING'', NULL, NULL, 1),
@@ -4631,7 +4632,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 WHERE sc.configuration_id IN
                       (
                         1, 2, 3, 4, 7, 8, 9,
-                        10, 13, 16, 18, 19, 20, 24,
+                        10, 13, 16, 17, 18, 19, 20, 24,
                         27, 28, 31, 33, 34, 35, 37, 39,
                         40, 41, 42, 43  /* SQL Server 2025 options */
                       );
