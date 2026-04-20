@@ -1217,34 +1217,72 @@ OPTION(RECOMPILE, MAXDOP 1);';
         sample_sql_handle,
         sample_plan_handle
     )
+    /*
+    sample_sql_handle and sample_plan_handle previously used
+    MAX(ps.sql_handle) and MAX(ps.plan_handle) — each picked the
+    lexicographic max independently, so the two values could come
+    from different plan rows and produce a mismatched text/plan
+    pair when retrieved downstream. ROW_NUMBER() OVER
+    (PARTITION BY database_id, object_id ORDER BY execution_count
+    DESC) in a derived table, then MAX(CASE WHEN n = 1 THEN ...)
+    in the outer aggregate, pulls both handles from the SAME winner
+    row. Single DMV scan + one sort + one aggregate — much lighter
+    than CROSS APPLY-ing the DMV per group, which nested-loops
+    poorly on busy servers.
+    */
     SELECT
         query_type = 'Procedure',
-        database_name = DB_NAME(ps.database_id),
-        object_name = OBJECT_SCHEMA_NAME(ps.object_id, ps.database_id) + N'.' + OBJECT_NAME(ps.object_id, ps.database_id),
-        plan_count = COUNT_BIG(DISTINCT ps.plan_handle),
-        total_executions = SUM(ps.execution_count),
-        total_cpu_ms = SUM(ps.total_worker_time) / 1000.0,
-        total_duration_ms = SUM(ps.total_elapsed_time) / 1000.0,
-        total_logical_reads = SUM(ps.total_logical_reads),
-        total_logical_writes = SUM(ps.total_logical_writes),
-        total_physical_reads = SUM(ps.total_physical_reads),
-        oldest_plan_creation = MIN(ps.cached_time),
-        newest_plan_creation = MAX(ps.cached_time),
-        last_execution_time = MAX(ps.last_execution_time),
-        sample_sql_handle = MAX(ps.sql_handle),
-        sample_plan_handle = MAX(ps.plan_handle)
-    FROM sys.dm_exec_procedure_stats AS ps
-    WHERE ps.execution_count >= @minimum_execution_count
-    AND   ps.database_id > CASE WHEN @ignore_system_databases = 1 THEN 4 ELSE 0 END
-    AND   ps.database_id < 32761
-    AND   ps.database_id = ISNULL(@database_id, ps.database_id)
-    AND   ps.cached_time >= ISNULL(@start_date, ps.cached_time)
-    AND   ps.cached_time < ISNULL(@end_date, DATEADD(DAY, 1, ps.cached_time))
+        database_name = DB_NAME(r.database_id),
+        object_name = OBJECT_SCHEMA_NAME(r.object_id, r.database_id) + N'.' + OBJECT_NAME(r.object_id, r.database_id),
+        plan_count = COUNT_BIG(DISTINCT r.plan_handle),
+        total_executions = SUM(r.execution_count),
+        total_cpu_ms = SUM(r.total_worker_time) / 1000.0,
+        total_duration_ms = SUM(r.total_elapsed_time) / 1000.0,
+        total_logical_reads = SUM(r.total_logical_reads),
+        total_logical_writes = SUM(r.total_logical_writes),
+        total_physical_reads = SUM(r.total_physical_reads),
+        oldest_plan_creation = MIN(r.cached_time),
+        newest_plan_creation = MAX(r.cached_time),
+        last_execution_time = MAX(r.last_execution_time),
+        sample_sql_handle = MAX(CASE WHEN r.n = 1 THEN r.sql_handle END),
+        sample_plan_handle = MAX(CASE WHEN r.n = 1 THEN r.plan_handle END)
+    FROM
+    (
+        SELECT
+            ps.database_id,
+            ps.object_id,
+            ps.plan_handle,
+            ps.sql_handle,
+            ps.execution_count,
+            ps.total_worker_time,
+            ps.total_elapsed_time,
+            ps.total_logical_reads,
+            ps.total_logical_writes,
+            ps.total_physical_reads,
+            ps.cached_time,
+            ps.last_execution_time,
+            n =
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY
+                        ps.database_id,
+                        ps.object_id
+                    ORDER BY
+                        ps.execution_count DESC
+                )
+        FROM sys.dm_exec_procedure_stats AS ps
+        WHERE ps.execution_count >= @minimum_execution_count
+        AND   ps.database_id > CASE WHEN @ignore_system_databases = 1 THEN 4 ELSE 0 END
+        AND   ps.database_id < 32761
+        AND   ps.database_id = ISNULL(@database_id, ps.database_id)
+        AND   ps.cached_time >= ISNULL(@start_date, ps.cached_time)
+        AND   ps.cached_time < ISNULL(@end_date, DATEADD(DAY, 1, ps.cached_time))
+    ) AS r
     GROUP BY
-        ps.database_id,
-        ps.object_id
+        r.database_id,
+        r.object_id
     HAVING
-        SUM(ps.execution_count) >= @minimum_execution_count
+        SUM(r.execution_count) >= @minimum_execution_count
     OPTION(RECOMPILE, MAXDOP 1);
 
     IF @debug = 1
@@ -1300,34 +1338,60 @@ WITH
     sample_sql_handle,
     sample_plan_handle
 )
+/* Same ROW_NUMBER + derived-table pattern as procedure path. */
 SELECT
     query_type = ''Function'',
-    database_name = DB_NAME(fs.database_id),
-    object_name = OBJECT_SCHEMA_NAME(fs.object_id, fs.database_id) + N''.'' + OBJECT_NAME(fs.object_id, fs.database_id),
-    plan_count = COUNT_BIG(DISTINCT fs.plan_handle),
-    total_executions = SUM(fs.execution_count),
-    total_cpu_ms = SUM(fs.total_worker_time) / 1000.0,
-    total_duration_ms = SUM(fs.total_elapsed_time) / 1000.0,
-    total_logical_reads = SUM(fs.total_logical_reads),
-    total_logical_writes = SUM(fs.total_logical_writes),
-    total_physical_reads = SUM(fs.total_physical_reads),
-    oldest_plan_creation = MIN(fs.cached_time),
-    newest_plan_creation = MAX(fs.cached_time),
-    last_execution_time = MAX(fs.last_execution_time),
-    sample_sql_handle = MAX(fs.sql_handle),
-    sample_plan_handle = MAX(fs.plan_handle)
-FROM sys.dm_exec_function_stats AS fs
-WHERE fs.execution_count >= @minimum_execution_count
-AND   fs.database_id > CASE WHEN @ignore_system_databases = 1 THEN 4 ELSE 0 END
-AND   fs.database_id < 32761
-AND   fs.database_id = ISNULL(@database_id, fs.database_id)
-AND   fs.cached_time >= ISNULL(@start_date, fs.cached_time)
-AND   fs.cached_time < ISNULL(@end_date, DATEADD(DAY, 1, fs.cached_time))
+    database_name = DB_NAME(r.database_id),
+    object_name = OBJECT_SCHEMA_NAME(r.object_id, r.database_id) + N''.'' + OBJECT_NAME(r.object_id, r.database_id),
+    plan_count = COUNT_BIG(DISTINCT r.plan_handle),
+    total_executions = SUM(r.execution_count),
+    total_cpu_ms = SUM(r.total_worker_time) / 1000.0,
+    total_duration_ms = SUM(r.total_elapsed_time) / 1000.0,
+    total_logical_reads = SUM(r.total_logical_reads),
+    total_logical_writes = SUM(r.total_logical_writes),
+    total_physical_reads = SUM(r.total_physical_reads),
+    oldest_plan_creation = MIN(r.cached_time),
+    newest_plan_creation = MAX(r.cached_time),
+    last_execution_time = MAX(r.last_execution_time),
+    sample_sql_handle = MAX(CASE WHEN r.n = 1 THEN r.sql_handle END),
+    sample_plan_handle = MAX(CASE WHEN r.n = 1 THEN r.plan_handle END)
+FROM
+(
+    SELECT
+        fs.database_id,
+        fs.object_id,
+        fs.plan_handle,
+        fs.sql_handle,
+        fs.execution_count,
+        fs.total_worker_time,
+        fs.total_elapsed_time,
+        fs.total_logical_reads,
+        fs.total_logical_writes,
+        fs.total_physical_reads,
+        fs.cached_time,
+        fs.last_execution_time,
+        n =
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY
+                    fs.database_id,
+                    fs.object_id
+                ORDER BY
+                    fs.execution_count DESC
+            )
+    FROM sys.dm_exec_function_stats AS fs
+    WHERE fs.execution_count >= @minimum_execution_count
+    AND   fs.database_id > CASE WHEN @ignore_system_databases = 1 THEN 4 ELSE 0 END
+    AND   fs.database_id < 32761
+    AND   fs.database_id = ISNULL(@database_id, fs.database_id)
+    AND   fs.cached_time >= ISNULL(@start_date, fs.cached_time)
+    AND   fs.cached_time < ISNULL(@end_date, DATEADD(DAY, 1, fs.cached_time))
+) AS r
 GROUP BY
-    fs.database_id,
-    fs.object_id
+    r.database_id,
+    r.object_id
 HAVING
-    SUM(fs.execution_count) >= @minimum_execution_count
+    SUM(r.execution_count) >= @minimum_execution_count
 OPTION(RECOMPILE, MAXDOP 1);';
 
         EXECUTE sys.sp_executesql
@@ -1380,34 +1444,60 @@ OPTION(RECOMPILE, MAXDOP 1);';
         sample_sql_handle,
         sample_plan_handle
     )
+    /* Same ROW_NUMBER + derived-table pattern as procedure/function paths. */
     SELECT
         query_type = 'Trigger',
-        database_name = DB_NAME(ts.database_id),
-        object_name = OBJECT_SCHEMA_NAME(ts.object_id, ts.database_id) + N'.' + OBJECT_NAME(ts.object_id, ts.database_id),
-        plan_count = COUNT_BIG(DISTINCT ts.plan_handle),
-        total_executions = SUM(ts.execution_count),
-        total_cpu_ms = SUM(ts.total_worker_time) / 1000.0,
-        total_duration_ms = SUM(ts.total_elapsed_time) / 1000.0,
-        total_logical_reads = SUM(ts.total_logical_reads),
-        total_logical_writes = SUM(ts.total_logical_writes),
-        total_physical_reads = SUM(ts.total_physical_reads),
-        oldest_plan_creation = MIN(ts.cached_time),
-        newest_plan_creation = MAX(ts.cached_time),
-        last_execution_time = MAX(ts.last_execution_time),
-        sample_sql_handle = MAX(ts.sql_handle),
-        sample_plan_handle = MAX(ts.plan_handle)
-    FROM sys.dm_exec_trigger_stats AS ts
-    WHERE ts.execution_count >= @minimum_execution_count
-    AND   ts.database_id > CASE WHEN @ignore_system_databases = 1 THEN 4 ELSE 0 END
-    AND   ts.database_id < 32761
-    AND   ts.database_id = ISNULL(@database_id, ts.database_id)
-    AND   ts.cached_time >= ISNULL(@start_date, ts.cached_time)
-    AND   ts.cached_time < ISNULL(@end_date, DATEADD(DAY, 1, ts.cached_time))
+        database_name = DB_NAME(r.database_id),
+        object_name = OBJECT_SCHEMA_NAME(r.object_id, r.database_id) + N'.' + OBJECT_NAME(r.object_id, r.database_id),
+        plan_count = COUNT_BIG(DISTINCT r.plan_handle),
+        total_executions = SUM(r.execution_count),
+        total_cpu_ms = SUM(r.total_worker_time) / 1000.0,
+        total_duration_ms = SUM(r.total_elapsed_time) / 1000.0,
+        total_logical_reads = SUM(r.total_logical_reads),
+        total_logical_writes = SUM(r.total_logical_writes),
+        total_physical_reads = SUM(r.total_physical_reads),
+        oldest_plan_creation = MIN(r.cached_time),
+        newest_plan_creation = MAX(r.cached_time),
+        last_execution_time = MAX(r.last_execution_time),
+        sample_sql_handle = MAX(CASE WHEN r.n = 1 THEN r.sql_handle END),
+        sample_plan_handle = MAX(CASE WHEN r.n = 1 THEN r.plan_handle END)
+    FROM
+    (
+        SELECT
+            ts.database_id,
+            ts.object_id,
+            ts.plan_handle,
+            ts.sql_handle,
+            ts.execution_count,
+            ts.total_worker_time,
+            ts.total_elapsed_time,
+            ts.total_logical_reads,
+            ts.total_logical_writes,
+            ts.total_physical_reads,
+            ts.cached_time,
+            ts.last_execution_time,
+            n =
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY
+                        ts.database_id,
+                        ts.object_id
+                    ORDER BY
+                        ts.execution_count DESC
+                )
+        FROM sys.dm_exec_trigger_stats AS ts
+        WHERE ts.execution_count >= @minimum_execution_count
+        AND   ts.database_id > CASE WHEN @ignore_system_databases = 1 THEN 4 ELSE 0 END
+        AND   ts.database_id < 32761
+        AND   ts.database_id = ISNULL(@database_id, ts.database_id)
+        AND   ts.cached_time >= ISNULL(@start_date, ts.cached_time)
+        AND   ts.cached_time < ISNULL(@end_date, DATEADD(DAY, 1, ts.cached_time))
+    ) AS r
     GROUP BY
-        ts.database_id,
-        ts.object_id
+        r.database_id,
+        r.object_id
     HAVING
-        SUM(ts.execution_count) >= @minimum_execution_count
+        SUM(r.execution_count) >= @minimum_execution_count
     OPTION(RECOMPILE, MAXDOP 1);
 
     IF @debug = 1
