@@ -4062,16 +4062,18 @@ BEGIN
 
             IF @debug = 1
             BEGIN
-                PRINT SUBSTRING(@view_sql, 0,     4000);
-                PRINT SUBSTRING(@view_sql, 4001,  8000);
-                PRINT SUBSTRING(@view_sql, 8001,  12000);
-                PRINT SUBSTRING(@view_sql, 12001, 16000);
-                PRINT SUBSTRING(@view_sql, 16001, 20000);
-                PRINT SUBSTRING(@view_sql, 20001, 24000);
-                PRINT SUBSTRING(@view_sql, 24001, 28000);
-                PRINT SUBSTRING(@view_sql, 28001, 32000);
-                PRINT SUBSTRING(@view_sql, 32001, 36000);
-                PRINT SUBSTRING(@view_sql, 36001, 40000);
+                /* SUBSTRING third arg is length, not end-position. See
+                   the @table_sql block below for the same fix. */
+                PRINT SUBSTRING(@view_sql,     1, 4000);
+                PRINT SUBSTRING(@view_sql,  4001, 4000);
+                PRINT SUBSTRING(@view_sql,  8001, 4000);
+                PRINT SUBSTRING(@view_sql, 12001, 4000);
+                PRINT SUBSTRING(@view_sql, 16001, 4000);
+                PRINT SUBSTRING(@view_sql, 20001, 4000);
+                PRINT SUBSTRING(@view_sql, 24001, 4000);
+                PRINT SUBSTRING(@view_sql, 28001, 4000);
+                PRINT SUBSTRING(@view_sql, 32001, 4000);
+                PRINT SUBSTRING(@view_sql, 36001, 4000);
             END;
 
             IF @debug = 1 BEGIN RAISERROR(N'creating view %s', 0, 1, @event_type_check) WITH NOWAIT; END;
@@ -4716,16 +4718,23 @@ ORDER BY
 
             IF @debug = 1
             BEGIN
-                PRINT SUBSTRING(@table_sql, 0, 4000);
-                PRINT SUBSTRING(@table_sql, 4001, 8000);
-                PRINT SUBSTRING(@table_sql, 8001, 12000);
-                PRINT SUBSTRING(@table_sql, 12001, 16000);
-                PRINT SUBSTRING(@table_sql, 16001, 20000);
-                PRINT SUBSTRING(@table_sql, 20001, 24000);
-                PRINT SUBSTRING(@table_sql, 24001, 28000);
-                PRINT SUBSTRING(@table_sql, 28001, 32000);
-                PRINT SUBSTRING(@table_sql, 32001, 36000);
-                PRINT SUBSTRING(@table_sql, 36001, 40000);
+                /* SUBSTRING third arg is length, not end-position.
+                   Previous values (4001, 8000), (8001, 12000), etc. took
+                   8000 / 12000 / 16000 chars starting at each offset, so
+                   chunks massively overlapped instead of tiling. First
+                   call with start=0 also returned 3,999 chars (0-start
+                   eats one position). Normalized to 4000-char tiles
+                   starting at 1, 4001, 8001, ... */
+                PRINT SUBSTRING(@table_sql,     1, 4000);
+                PRINT SUBSTRING(@table_sql,  4001, 4000);
+                PRINT SUBSTRING(@table_sql,  8001, 4000);
+                PRINT SUBSTRING(@table_sql, 12001, 4000);
+                PRINT SUBSTRING(@table_sql, 16001, 4000);
+                PRINT SUBSTRING(@table_sql, 20001, 4000);
+                PRINT SUBSTRING(@table_sql, 24001, 4000);
+                PRINT SUBSTRING(@table_sql, 28001, 4000);
+                PRINT SUBSTRING(@table_sql, 32001, 4000);
+                PRINT SUBSTRING(@table_sql, 36001, 4000);
             END;
 
             /* this executes the insert */

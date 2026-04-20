@@ -1774,8 +1774,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
 
         IF @debug = 1
         BEGIN
-            PRINT SUBSTRING(@disk_check, 1, 4000);
-            PRINT SUBSTRING(@disk_check, 4001, 8000);
+            PRINT SUBSTRING(@disk_check,    1, 4000);
+            PRINT SUBSTRING(@disk_check, 4001, 4000);
         END;
 
         INSERT
@@ -3299,8 +3299,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
 
         IF @debug = 1
         BEGIN
-            PRINT SUBSTRING(@mem_sql, 1, 4000);
-            PRINT SUBSTRING(@mem_sql, 4001, 8000);
+            PRINT SUBSTRING(@mem_sql,    1, 4000);
+            PRINT SUBSTRING(@mem_sql, 4001, 4000);
         END;
 
         IF @log_to_table = 0
@@ -4015,8 +4015,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
 
             IF @debug = 1
             BEGIN
-                PRINT SUBSTRING(@cpu_sql, 1, 4000);
-                PRINT SUBSTRING(@cpu_sql, 4001, 8000);
+                PRINT SUBSTRING(@cpu_sql,    1, 4000);
+                PRINT SUBSTRING(@cpu_sql, 4001, 4000);
             END;
 
             IF @log_to_table = 0
