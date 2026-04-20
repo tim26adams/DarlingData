@@ -3885,13 +3885,19 @@ IF EXISTS
     AND   hew.is_view_created = 0
 )
 OR
-(   /* If the proc has been modified, maybe views have been added or changed? */
+(   /* If the proc has been modified, maybe views have been added or changed?
+       "Recently modified" means modify_date is AFTER (later than) an hour
+       ago — the original used < which is "more than an hour ago," i.e.,
+       true for every install older than one hour, so the guard fired on
+       every 5-second loop iteration forever. @view_tracker short-circuits
+       the actual view-creation work but the scan of #human_events_worker
+       and sys.all_objects still ran every cycle. */
     SELECT
         o.modify_date
     FROM sys.all_objects AS o
     WHERE o.type = N'P'
     AND   o.name = N'sp_HumanEvents'
-) < DATEADD(HOUR, -1, SYSDATETIME())
+) > DATEADD(HOUR, -1, SYSDATETIME())
 BEGIN
     IF @debug = 1 BEGIN RAISERROR(N'Found views to create, beginning!', 0, 1) WITH NOWAIT; END;
     IF
