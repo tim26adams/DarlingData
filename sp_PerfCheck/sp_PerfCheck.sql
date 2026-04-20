@@ -4649,8 +4649,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 PRINT @current_database_id;
                 PRINT @current_database_name;
                 PRINT REPLICATE('=', 64);
-                PRINT SUBSTRING(@sql, 1, 4000);
-                PRINT SUBSTRING(@sql, 4001, 8000);
+                PRINT SUBSTRING(@sql,    1, 4000);
+                PRINT SUBSTRING(@sql, 4001, 4000);
             END;
 
             EXECUTE sys.sp_executesql

@@ -12306,11 +12306,21 @@ OPTION(RECOMPILE);' + @nc10
 
     IF @debug = 1
     BEGIN
+        /*
+        PRINT truncates at 4000 chars for nvarchar/8000 for varchar, so
+        long @sql needs to be chunked. SUBSTRING's third argument is
+        length, not end-position — the previous calls had 4001/8000,
+        8001/12000, 12001/16000 which tiled *lengths* against *starts*
+        and produced massively overlapping windows (each chunk dumped
+        8k/12k/16k chars from its start, not the intended 4k). The
+        first chunk also started at 0, which SUBSTRING treats as "one
+        before position 1" — only 3,999 chars came out. Fixed both.
+        */
         PRINT LEN(@sql);
-        PRINT SUBSTRING(@sql, 0, 4000);
-        PRINT SUBSTRING(@sql, 4001, 8000);
-        PRINT SUBSTRING(@sql, 8001, 12000);
-        PRINT SUBSTRING(@sql, 12001, 16000);
+        PRINT SUBSTRING(@sql,     1, 4000);
+        PRINT SUBSTRING(@sql,  4001, 4000);
+        PRINT SUBSTRING(@sql,  8001, 4000);
+        PRINT SUBSTRING(@sql, 12001, 4000);
     END;
 
     EXECUTE sys.sp_executesql
