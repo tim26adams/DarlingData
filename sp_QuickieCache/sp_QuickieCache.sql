@@ -584,7 +584,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         WHERE pa.attribute = N'dbid'
     ) AS pa
     WHERE 1 = 1
-    AND   (@database_id IS NULL OR pa.value = @database_id)
+    AND   (@database_id IS NULL OR CONVERT(integer, pa.value) = @database_id)
     OPTION(RECOMPILE);
 
     IF @total_plans > 0
@@ -1107,7 +1107,7 @@ AND   ISNULL(pa.value, 0) < 32761'
     CASE
         WHEN @database_id IS NOT NULL
         THEN N'
-AND   pa.value = @database_id'
+AND   CONVERT(integer, pa.value) = @database_id'
         ELSE N''
     END +
     CASE
