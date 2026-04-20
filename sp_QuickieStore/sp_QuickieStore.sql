@@ -8412,6 +8412,29 @@ to use @regression_where_clause.
 IF @regression_mode = 1
 BEGIN
 
+/*
+Fragility note for future maintainers:
+
+This block rebuilds @where_clause into @regression_where_clause by
+textually replacing the tokens '@start_date' and '@end_date' with their
+regression-baseline counterparts. It works today because the ONLY site
+that introduces those tokens into @where_clause is the date-range
+filter added further up (look for
+    "qsrs.last_execution_time >= @start_date
+     AND qsrs.last_execution_time <  @end_date")
+and that's exactly the fragment we want rewritten for the baseline
+window.
+
+If a new filter is ever added that references @start_date or @end_date
+for a DIFFERENT purpose (e.g. a statistical lookback window that should
+NOT move with the regression baseline), this string REPLACE will
+silently corrupt it. Either:
+  - don't use @start_date / @end_date as parameter names in any other
+    @where_clause += fragment, or
+  - switch to a sentinel-token approach (e.g. build with '{{start}}'
+    / '{{end}}' and REPLACE to the appropriate parameter name per
+    window) so the regression rewrite is explicit.
+*/
 SELECT
     @regression_where_clause =
         REPLACE
