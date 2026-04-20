@@ -72,8 +72,8 @@ BEGIN
     SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
     SELECT
-        @version = '3.4',
-        @version_date = '20260401';
+        @version = '3.5',
+        @version_date = '20260420';
 
     IF @help = 1
     BEGIN
@@ -435,15 +435,24 @@ AND   ca.utc_timestamp < @end_date';
     END;
     ELSE
     BEGIN
-        /* 2017+ handling */
+        /*
+        2017+ handling. Use the same half-open (>= @start_date AND
+        < @end_date) shape as the pre-2017 branch so an event captured
+        at exactly @end_date is not included on 2017+ while excluded
+        on pre-2017 — previously BETWEEN meant a closed interval on
+        2017+ and a row at the boundary could appear or not depending
+        on which branch ran.
+        */
         SET @cross_apply = N'CROSS APPLY xml.{object_name}.nodes(''/event'') AS e(x)';
 
         IF @timestamp_utc_mode = 1
             SET @time_filter = N'
-    AND   CONVERT(datetimeoffset(7), fx.timestamp_utc) BETWEEN @start_date AND @end_date';
+    AND   CONVERT(datetimeoffset(7), fx.timestamp_utc) >= @start_date
+    AND   CONVERT(datetimeoffset(7), fx.timestamp_utc) <  @end_date';
         ELSE
             SET @time_filter = N'
-    AND   fx.timestamp_utc BETWEEN @start_date AND @end_date';
+    AND   fx.timestamp_utc >= @start_date
+    AND   fx.timestamp_utc <  @end_date';
     END;
 
     SET @sql_template =
@@ -2218,7 +2227,21 @@ AND   ca.utc_timestamp < @end_date';
                 ),
             tc.wait_type,
             waits = SUM(CONVERT(bigint, tc.waits)),
-            average_wait_time_ms = CONVERT(bigint, AVG(tc.average_wait_time_ms)),
+            /*
+            Weighted average rather than AVG(avg): tc.average_wait_time_ms
+            is already a per-event average, so AVG() over the bucket was
+            an unweighted mean of means — events with one wait got the
+            same pull on the output as events with thousands. Weight by
+            waits to get the true bucket-scoped average. NULLIF keeps us
+            safe if every contributing row had waits = 0.
+            */
+            average_wait_time_ms =
+                CONVERT
+                (
+                    bigint,
+                    SUM(CONVERT(decimal(38, 2), tc.average_wait_time_ms) * CONVERT(decimal(38, 2), tc.waits))
+                  / NULLIF(SUM(CONVERT(decimal(38, 2), tc.waits)), 0)
+                ),
             max_wait_time_ms = CONVERT(bigint, MAX(tc.max_wait_time_ms))
         INTO #tc
         FROM #topwaits_count AS tc
@@ -2951,7 +2974,11 @@ AND   ca.utc_timestamp < @end_date';
         CROSS APPLY wi.sp_server_diagnostics_component_result.nodes('/event') AS w(x)
         WHERE w.x.exist('(data[@name="component"]/text[.= "QUERY_PROCESSING"])') = 1
         AND  (w.x.exist('(data[@name="state"]/text[.= "WARNING"])') = @warnings_only OR @warnings_only = 0)
-        AND  (w.x.exist('(/event/data[@name="data"]/value/queryProcessing/@pendingTasks[.>= sql:variable("@pending_task_threshold")])') = 1 OR @warnings_only = 0)
+        /* Threshold is honored whether or not @warnings_only is set — the
+           parameter documents "minimum pending tasks to display" and the
+           previous `OR @warnings_only = 0` short-circuit silently ignored
+           the user-supplied value whenever warnings-only was off. */
+        AND   w.x.exist('(/event/data[@name="data"]/value/queryProcessing/@pendingTasks[.>= sql:variable("@pending_task_threshold")])') = 1
         OPTION(RECOMPILE, MAXDOP 1);
 
         IF @debug = 1
@@ -3176,7 +3203,10 @@ AND   ca.utc_timestamp < @end_date';
         INTO #pending_task_details
         FROM #sp_server_diagnostics_component_result AS wi
         CROSS APPLY wi.sp_server_diagnostics_component_result.nodes('/event') AS w(x)
-        CROSS APPLY w.x.nodes('/event/data[@name="data"]/value/queryProcessing[@pendingTasks > 1]/pendingTasks/entryPoint') AS ep(e)
+        /* Hardcoded threshold > 1 ignored the @pending_task_threshold
+           parameter. Replaced with sql:variable() binding so the user's
+           value actually takes effect here too. */
+        CROSS APPLY w.x.nodes('/event/data[@name="data"]/value/queryProcessing[@pendingTasks >= sql:variable("@pending_task_threshold")]/pendingTasks/entryPoint') AS ep(e)
         WHERE w.x.exist('(data[@name="component"]/text[.= "QUERY_PROCESSING"])') = 1
         AND  (w.x.exist('(data[@name="state"]/text[.= "WARNING"])') = @warnings_only OR @warnings_only = 0)
         OPTION(RECOMPILE, MAXDOP 1);
@@ -5721,9 +5751,16 @@ AND   ca.utc_timestamp < @end_date';
             FROM #deadlocks AS d
             CROSS APPLY d.xml_deadlock_report.nodes('//deadlock/process-list/process') AS e(x)
         ) AS x
+        /* Standard "filter if supplied, pass-through if NULL" predicate
+           pairs must be combined with AND between the groups — OR let
+           rows through whenever either parameter was NULL, which makes
+           the @database_name/@dbid filter loose whenever only one side
+           was supplied. Currently masked because the validation block
+           above aborts when the two disagree, but the shape was
+           wrong and would break if that validation ever relaxed. */
         WHERE (x.database_id = @dbid
                OR @dbid IS NULL)
-        OR    (x.current_database_name = @database_name
+        AND   (x.current_database_name = @database_name
                OR @database_name IS NULL)
         OPTION(RECOMPILE, MAXDOP 1);
 

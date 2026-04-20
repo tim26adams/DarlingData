@@ -72,7 +72,7 @@ ALTER PROCEDURE
     @target_schema sysname = NULL, /*schema of the table*/
     @target_table sysname = NULL, /*table name*/
     @target_column sysname = NULL, /*column containing XML data*/
-    @timestamp_column sysname = NULL, /*column containing timestamp (optional)*/
+    @timestamp_column sysname = NULL, /*column containing UTC timestamp (optional); see @help = 1 for details*/
     @log_to_table bit = 0, /*enable logging to permanent tables*/
     @log_database_name sysname = NULL, /*database to store logging tables*/
     @log_schema_name sysname = NULL, /*schema to store logging tables*/
@@ -93,8 +93,8 @@ SET XACT_ABORT OFF;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
-    @version = '5.4',
-    @version_date = '20260401';
+    @version = '5.5',
+    @version_date = '20260420';
 
 IF @help = 1
 BEGIN
@@ -126,7 +126,7 @@ BEGIN
                  WHEN N'@target_schema' THEN 'schema of the table containing blocked process report data'
                  WHEN N'@target_table' THEN 'table containing blocked process report data'
                  WHEN N'@target_column' THEN 'column containing blocked process report XML'
-                 WHEN N'@timestamp_column' THEN 'column containing timestamp for filtering (optional)'
+                 WHEN N'@timestamp_column' THEN 'column containing UTC timestamp for filtering (optional). MUST be stored in UTC — @start_date and @end_date are shifted to UTC internally to match the XML @timestamp attribute, and the same UTC-shifted values are used for this column filter. A column in local time will be filtered against the wrong window.'
                  WHEN N'@log_to_table' THEN N'enable logging to permanent tables instead of returning results'
                  WHEN N'@log_database_name' THEN N'database to store logging tables'
                  WHEN N'@log_schema_name' THEN N'schema to store logging tables'
@@ -150,7 +150,7 @@ BEGIN
                  WHEN N'@target_schema' THEN 'a schema in the target database'
                  WHEN N'@target_table' THEN 'a table in the target schema'
                  WHEN N'@target_column' THEN 'an XML column containing blocked process report data'
-                 WHEN N'@timestamp_column' THEN 'a datetime column for filtering by date range'
+                 WHEN N'@timestamp_column' THEN 'a datetime / datetime2 / datetimeoffset column storing UTC timestamps'
                  WHEN N'@log_to_table' THEN N'0 or 1'
                  WHEN N'@log_database_name' THEN N'any valid database name'
                  WHEN N'@log_schema_name' THEN N'any valid schema name'
@@ -775,8 +775,8 @@ BEGIN
                 collection_time datetime2(7) NOT NULL DEFAULT SYSDATETIME(),
                 blocked_process_report varchar(22) NOT NULL,
                 event_time datetime2(7) NULL,
-                database_name nvarchar(128) NULL,
-                currentdbname nvarchar(256) NULL,
+                database_name sysname NULL,
+                currentdbname sysname NULL,
                 contentious_object nvarchar(4000) NULL,
                 activity varchar(8) NULL,
                 blocking_tree varchar(8000) NULL,
@@ -873,7 +873,7 @@ CREATE TABLE
 (
     id integer IDENTITY PRIMARY KEY CLUSTERED,
     check_id integer NOT NULL,
-    database_name nvarchar(256) NULL,
+    database_name sysname NULL,
     object_name nvarchar(1000) NULL,
     finding_group nvarchar(100) NULL,
     finding nvarchar(4000) NULL,
@@ -937,6 +937,16 @@ IF @debug = 1
 BEGIN
     RAISERROR('What kind of target does %s have?', 0, 1, @session_name) WITH NOWAIT;
 END;
+/*
+Auto-detect @target_type when not supplied. When a session has both
+targets attached, ORDER BY t.target_name picks 'event_file' over
+'ring_buffer' alphabetically — this is DELIBERATE. event_file is the
+more reliable target (ring_buffer has a finite in-memory window and
+drops older events under pressure), so a blocking report built from
+the file target has a better chance of covering the full window the
+caller asked for. Don't "fix" the ORDER BY to ring_buffer unless you
+want faster but less complete reads.
+*/
 IF  @target_type IS NULL
 AND @is_system_health = 0
 BEGIN
@@ -1217,7 +1227,7 @@ BEGIN
         RAISERROR('Inserting to #sp_server_diagnostics_component_result for target type: %s and system health: %s', 0, 1, @target_type, @is_system_health_msg) WITH NOWAIT;
     END;
 
-    IF @target_type = N'ring_buffer'
+    IF LOWER(@target_type) = N'ring_buffer'
     BEGIN
         INSERT
             #sp_server_diagnostics_component_result
@@ -1312,7 +1322,7 @@ BEGIN
 
     SELECT
         bx.event_time,
-        currentdbname = bd.value('(process/@currentdbname)[1]', 'nvarchar(128)'),
+        currentdbname = bd.value('(process/@currentdbname)[1]', 'sysname'),
         spid = bd.value('(process/@spid)[1]', 'integer'),
         ecid = bd.value('(process/@ecid)[1]', 'integer'),
         query_text_pre = bd.value('(process/inputbuf/text())[1]', 'nvarchar(max)'),
@@ -1369,7 +1379,7 @@ BEGIN
     /*Blocking queries*/
     SELECT
         bx.event_time,
-        currentdbname = bg.value('(process/@currentdbname)[1]', 'nvarchar(128)'),
+        currentdbname = bg.value('(process/@currentdbname)[1]', 'sysname'),
         spid = bg.value('(process/@spid)[1]', 'integer'),
         ecid = bg.value('(process/@ecid)[1]', 'integer'),
         query_text_pre = bg.value('(process/inputbuf/text())[1]', 'nvarchar(max)'),
@@ -1852,7 +1862,16 @@ BEGIN
     N'.nodes(''/event'') AS e(x)
     WHERE e.x.exist(''@name[ .= "blocked_process_report"]'') = 1';
 
-    /* Add timestamp filtering if specified*/
+    /*
+    Add timestamp filtering if specified.
+
+    NOTE: @start_date and @end_date are shifted from local to UTC earlier
+    in the proc so they line up with the XML @timestamp attribute (which
+    is UTC). The @timestamp_column value is passed through as-is, so the
+    caller's column MUST already contain UTC timestamps — if it holds
+    local time, rows will be filtered against the wrong window by the
+    local-vs-UTC offset. See the parameter help text.
+    */
     IF @timestamp_column IS NOT NULL
     BEGIN
             SET @extract_sql = @extract_sql + N'
@@ -1942,7 +1961,7 @@ SELECT
     log_used = bd.value('(process/@logused)[1]', 'bigint'),
     clientoption1 = bd.value('(process/@clientoption1)[1]', 'bigint'),
     clientoption2 = bd.value('(process/@clientoption2)[1]', 'bigint'),
-    currentdbname = bd.value('(process/@currentdbname)[1]', 'nvarchar(256)'),
+    currentdbname = bd.value('(process/@currentdbname)[1]', 'sysname'),
     currentdbid = bd.value('(process/@currentdb)[1]', 'integer'),
     blocking_level = 0,
     sort_order = CONVERT(varchar(400), ''),
@@ -2062,7 +2081,7 @@ SELECT
     log_used = bg.value('(process/@logused)[1]', 'bigint'),
     clientoption1 = bg.value('(process/@clientoption1)[1]', 'bigint'),
     clientoption2 = bg.value('(process/@clientoption2)[1]', 'bigint'),
-    currentdbname = bg.value('(process/@currentdbname)[1]', 'nvarchar(128)'),
+    currentdbname = bg.value('(process/@currentdbname)[1]', 'sysname'),
     currentdbid = bg.value('(process/@currentdb)[1]', 'integer'),
     blocking_level = 0,
     sort_order = CONVERT(varchar(400), ''),
@@ -2189,6 +2208,15 @@ WITH
     JOIN #blocking AS bg
       ON  bg.monitor_loop = h.monitor_loop
       AND bg.blocking_desc = h.blocked_desc
+    /*
+    Cycle guard: skip a row whose blocked_desc already appears in the
+    accumulated sort_order. Two sessions can briefly appear to block each
+    other in the same monitor_loop (before the deadlock monitor fires),
+    and without a guard the recursion has no exit. The sort_order string
+    contains every (SPID:ECID) we've visited on this branch; checking for
+    the candidate blocked_desc before we follow it prevents the cycle.
+    */
+    WHERE h.sort_order NOT LIKE '%' + bg.blocked_desc + '%'
 )
 UPDATE
     #blocked
@@ -2200,7 +2228,13 @@ JOIN hierarchy AS h
   ON  h.monitor_loop = b.monitor_loop
   AND h.blocking_desc = b.blocking_desc
   AND h.blocked_desc = b.blocked_desc
-OPTION(RECOMPILE, MAXRECURSION 0);
+/*
+MAXRECURSION 100 (the default) is plenty for real blocking chains and
+still acts as a backstop if the cycle guard above is ever bypassed by
+a blocked_desc that doesn't format the same way as expected. Reverted
+from MAXRECURSION 0 which gave the runaway case no ceiling at all.
+*/
+OPTION(RECOMPILE, MAXRECURSION 100);
 
 IF @debug = 1
 BEGIN
@@ -2430,7 +2464,7 @@ SET
         N'database: ' +
         ISNULL(b.database_name, N'unknown') +
         N' object_id: ' +
-        ISNULL(RTRIM(b.object_id), N'unknown')
+        ISNULL(CONVERT(nvarchar(20), b.object_id), N'unknown')
     )
 FROM #blocks AS b
 CROSS APPLY

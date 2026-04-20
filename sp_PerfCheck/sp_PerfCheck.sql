@@ -64,8 +64,8 @@ BEGIN
         Set version information
         */
     SELECT
-        @version = N'2.4',
-        @version_date = N'20260401';
+        @version = N'2.5',
+        @version_date = N'20260420';
 
     /*
     Help section, for help.
@@ -1007,17 +1007,25 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     )
     SELECT
         check_id = 5103,
+        /*
+        Rate is deadlocks-per-day, computed from DATEDIFF(SECOND, ...) rather than
+        DATEDIFF(DAY, ...). The DAY-based version rounded sub-day uptime to 0 and
+        the NULLIF then collapsed the whole expression to NULL, which evaluated as
+        UNKNOWN in the WHERE below and silently skipped the deadlock check for the
+        first calendar-day-boundary of server uptime. SECOND-based rate keeps the
+        threshold semantics identical for any uptime ≥ 1 second.
+        */
         priority =
             CASE
                 WHEN
                 (
-                    1.0 *
-                    p.cntr_value /
+                    p.cntr_value *
+                    86400.0 /
                     NULLIF
                     (
                         DATEDIFF
                         (
-                            DAY,
+                            SECOND,
                             osi.sqlserver_start_time,
                             SYSDATETIME()
                         ),
@@ -1027,13 +1035,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 THEN 20 /* High: >100 deadlocks/day */
                 WHEN
                 (
-                    1.0 *
-                    p.cntr_value /
+                    p.cntr_value *
+                    86400.0 /
                     NULLIF
                     (
                         DATEDIFF
                         (
-                            DAY,
+                            SECOND,
                             osi.sqlserver_start_time,
                             SYSDATETIME()
                         ),
@@ -1074,13 +1082,13 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     AND   p.cntr_value > 0
     AND
     (
-        1.0 *
-        p.cntr_value /
+        p.cntr_value *
+        86400.0 /
         NULLIF
         (
             DATEDIFF
             (
-                DAY,
+                SECOND,
                 osi.sqlserver_start_time,
                 SYSDATETIME()
             ),
@@ -1134,8 +1142,14 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     FROM sys.dm_os_sys_info AS osi;
     END;
 
-    /* Check if Lock Pages in Memory is enabled (on-prem and managed instances only) */
+    /* Check if Lock Pages in Memory is enabled.
+       Only on-prem can change LPIM. Azure Managed Instance and AWS RDS
+       both run SQL Server on platforms that don't expose the
+       LockPagesInMemory user right, so flagging them is unactionable
+       noise. Matches the IFI check gate below for consistency. */
     IF  @azure_sql_db = 0
+    AND @azure_managed_instance = 0
+    AND @aws_rds = 0
     AND @has_view_server_state = 1
     BEGIN
         INSERT INTO
@@ -2046,7 +2060,19 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     /* Check for stolen memory from buffer pool */
     IF @has_view_server_state = 1
     BEGIN
-        /* Calculate pagelatch wait time for TempDB contention check */
+        /* Calculate pagelatch wait time for TempDB contention check.
+           Split into two scalar SELECTs — the previous version mixed an
+           aggregated value (@pagelatch_wait_hours) with a non-aggregated
+           one (@server_uptime_hours) in the same SELECT by joining
+           wait_stats to sys_info and GROUP BY'ing on the uptime
+           expression. It worked only because sys_info is always a
+           single-row view, and the GROUP BY on a scalar expression
+           reads oddly. */
+        SELECT
+            @server_uptime_hours =
+                DATEDIFF(SECOND, osi.sqlserver_start_time, SYSDATETIME()) / 3600.0
+        FROM sys.dm_os_sys_info AS osi;
+
         SELECT
             @pagelatch_wait_hours =
                 SUM
@@ -2056,13 +2082,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                         THEN osw.wait_time_ms / 1000.0 / 3600.0
                         ELSE 0
                     END
-                ),
-            @server_uptime_hours =
-                DATEDIFF(SECOND, osi.sqlserver_start_time, SYSDATETIME()) / 3600.0
-        FROM sys.dm_os_wait_stats AS osw
-        CROSS JOIN sys.dm_os_sys_info AS osi
-        GROUP BY
-            DATEDIFF(SECOND, osi.sqlserver_start_time, SYSDATETIME()) / 3600.0;
+                )
+        FROM sys.dm_os_wait_stats AS osw;
 
         SET @pagelatch_ratio_to_uptime =
             @pagelatch_wait_hours / NULLIF(@server_uptime_hours, 0) * 100;
@@ -2232,7 +2253,14 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         FROM sys.dm_os_memory_clerks AS domc
         WHERE domc.type = N'MEMORYCLERK_SQLBUFFERPOOL';
 
-        /* Get stolen memory */
+        /* Get stolen memory.
+           Anchored both object_name (LIKE %Memory Manager% to cover
+           both default and named-instance prefixes like
+           "SQLServer:Memory Manager" and "MSSQL$INST:Memory Manager")
+           and counter_name (exact match). Previous filter was a loose
+           LIKE N'Stolen Server%' that relied on the counter name being
+           globally unique; fine today but would silently drift if a
+           future build adds another prefix-matching counter. */
         SELECT
             @stolen_memory_gb =
                 CONVERT
@@ -2241,7 +2269,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                     dopc.cntr_value / 1024.0 / 1024.0
                 )
         FROM sys.dm_os_performance_counters AS dopc
-        WHERE dopc.counter_name LIKE N'Stolen Server%';
+        WHERE RTRIM(dopc.object_name) LIKE N'%Memory Manager%'
+        AND   RTRIM(dopc.counter_name) = N'Stolen Server Memory (KB)';
 
         /* Calculate stolen memory percentage */
         IF @buffer_pool_size_gb > 0
@@ -2249,8 +2278,14 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             SET @stolen_memory_pct =
                     (@stolen_memory_gb / (@buffer_pool_size_gb + @stolen_memory_gb)) * 100.0;
 
-            /* Query memory health history if available (SQL Server 2025+) */
+            /* Query memory health history if available (SQL Server 2025+).
+               OBJECT_ID existence-check only requires VIEW DEFINITION
+               metadata access; reading the DMV itself requires
+               VIEW SERVER STATE. Without gating on @has_view_server_state
+               a non-sysadmin caller would hit an unhandled permission
+               error from inside the sp_executesql. */
             IF @health_history_exists = CONVERT(bit, 'true')
+            AND @has_view_server_state = 1
             BEGIN
                 EXECUTE sys.sp_executesql
                     N'
@@ -3503,7 +3538,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             VALUES
             (
                 1002,
-                40, /* High priority */
+                20, /* High priority — OS-starvation risk */
                 N'Server Configuration',
                 N'Max Server Memory Too Close To Physical Memory',
                 N'Max server memory (' +
@@ -4545,6 +4580,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                     (@current_database_id, @current_database_name, 10, N''TSQL_SCALAR_UDF_INLINING'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 13, N''OPTIMIZE_FOR_AD_HOC_WORKLOADS'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 16, N''ROW_MODE_MEMORY_GRANT_FEEDBACK'', NULL, NULL, 1),
+                    (@current_database_id, @current_database_name, 17, N''ISOLATE_SECURITY_POLICY_CARDINALITY'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 18, N''BATCH_MODE_ON_ROWSTORE'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 19, N''DEFERRED_COMPILATION_TV'', NULL, NULL, 1),
                     (@current_database_id, @current_database_name, 20, N''ACCELERATED_PLAN_FORCING'', NULL, NULL, 1),
@@ -4617,7 +4653,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 WHERE sc.configuration_id IN
                       (
                         1, 2, 3, 4, 7, 8, 9,
-                        10, 13, 16, 18, 19, 20, 24,
+                        10, 13, 16, 17, 18, 19, 20, 24,
                         27, 28, 31, 33, 34, 35, 37, 39,
                         40, 41, 42, 43  /* SQL Server 2025 options */
                       );
@@ -4635,8 +4671,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 PRINT @current_database_id;
                 PRINT @current_database_name;
                 PRINT REPLICATE('=', 64);
-                PRINT SUBSTRING(@sql, 1, 4000);
-                PRINT SUBSTRING(@sql, 4001, 8000);
+                PRINT SUBSTRING(@sql,    1, 4000);
+                PRINT SUBSTRING(@sql, 4001, 4000);
             END;
 
             EXECUTE sys.sp_executesql

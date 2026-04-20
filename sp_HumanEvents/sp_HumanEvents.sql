@@ -88,8 +88,8 @@ SET XACT_ABORT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT
-    @version = '7.4',
-    @version_date = '20260401';
+    @version = '7.5',
+    @version_date = '20260420';
 
 IF @help = 1
 BEGIN
@@ -890,6 +890,25 @@ BEGIN
     RETURN;
 END;
 
+/*
+@seconds_sample drives the WAITFOR DELAY that controls how long the XE session
+samples before we shred results. When NULL it's treated as unset. When
+explicitly 0 the user is asking for no sampling, which would hit the
+unconditional WAITFOR below with an empty @waitfor string and raise a
+syntax error. Coerce NULL and 0 to 1 second — the minimum meaningful
+value — and warn if 0 was explicit.
+*/
+IF @debug = 1 BEGIN RAISERROR(N'Checking seconds_sample parameter', 0, 1) WITH NOWAIT; END;
+IF @seconds_sample IS NULL
+BEGIN
+    SET @seconds_sample = 1;
+END;
+ELSE IF @seconds_sample = 0
+BEGIN
+    RAISERROR(N'@seconds_sample = 0 is not meaningful (nothing would be sampled). Using 1 second instead. Pass a larger value for real sampling.', 0, 1) WITH NOWAIT;
+    SET @seconds_sample = 1;
+END;
+
 
 IF @debug = 1 BEGIN RAISERROR(N'Checking query sort order', 0, 1) WITH NOWAIT; END;
 IF @query_sort_order NOT IN
@@ -1459,54 +1478,62 @@ BEGIN
             GROUP BY
                 maps.rn
     )
+    /*
+    Build the wait_type filter as the full nvarchar(max) FOR XML
+    concatenation. Previously wrapped in SUBSTRING(..., 0, 8000), which
+    has two problems:
+      - SUBSTRING(x, 0, N) returns N-1 chars (the 0-start offset eats
+        one position). The cap was actually 7,999 chars, not 8,000.
+      - @wait_type_filter is nvarchar(max); capping at ~8k bytes is
+        arbitrary. With @wait_type = 'all' the predicate can grow past
+        that and the trailing closing paren appended below was being
+        tacked onto a mid-expression truncation — producing an invalid
+        XE session filter.
+    No cap needed; let the full predicate through.
+    */
     SELECT
         @wait_type_filter +=
-            SUBSTRING
             (
-                (
-                    SELECT
-                        N'      AND  ((' +
-                        STUFF
+                SELECT
+                    N'      AND  ((' +
+                    STUFF
+                    (
                         (
-                            (
-                                SELECT
-                                    N'         OR ' +
-                                    CASE
-                                        WHEN grps.minkey < grps.maxkey
-                                        THEN +
-                                        N'(wait_type >= ' +
-                                        CONVERT
-                                        (
-                                            nvarchar(11),
-                                            grps.minkey
-                                        ) +
-                                        N' AND wait_type <= ' +
-                                        CONVERT
-                                        (
-                                            nvarchar(11),
-                                            grps.maxkey
-                                        ) +
-                                        N')' +
-                                        @nc10
-                                        ELSE N'(wait_type = ' +
-                                        CONVERT
-                                        (
-                                            nvarchar(11),
-                                            grps.minkey
-                                        ) +
-                                        N')' +
-                                        @nc10
-                                    END
-                                FROM grps FOR XML PATH(N''), TYPE
-                            ).value('./text()[1]', 'nvarchar(max)')
-                            ,
-                            1,
-                            13,
-                            N''
-                        )
-                ),
-                0,
-                8000
+                            SELECT
+                                N'         OR ' +
+                                CASE
+                                    WHEN grps.minkey < grps.maxkey
+                                    THEN +
+                                    N'(wait_type >= ' +
+                                    CONVERT
+                                    (
+                                        nvarchar(11),
+                                        grps.minkey
+                                    ) +
+                                    N' AND wait_type <= ' +
+                                    CONVERT
+                                    (
+                                        nvarchar(11),
+                                        grps.maxkey
+                                    ) +
+                                    N')' +
+                                    @nc10
+                                    ELSE N'(wait_type = ' +
+                                    CONVERT
+                                    (
+                                        nvarchar(11),
+                                        grps.minkey
+                                    ) +
+                                    N')' +
+                                    @nc10
+                                END
+                            FROM grps FOR XML PATH(N''), TYPE
+                        ).value('./text()[1]', 'nvarchar(max)')
+                        ,
+                        1,
+                        13,
+                        N''
+                    )
             ) +
             N')';
 END;
@@ -3858,13 +3885,19 @@ IF EXISTS
     AND   hew.is_view_created = 0
 )
 OR
-(   /* If the proc has been modified, maybe views have been added or changed? */
+(   /* If the proc has been modified, maybe views have been added or changed?
+       "Recently modified" means modify_date is AFTER (later than) an hour
+       ago — the original used < which is "more than an hour ago," i.e.,
+       true for every install older than one hour, so the guard fired on
+       every 5-second loop iteration forever. @view_tracker short-circuits
+       the actual view-creation work but the scan of #human_events_worker
+       and sys.all_objects still ran every cycle. */
     SELECT
         o.modify_date
     FROM sys.all_objects AS o
     WHERE o.type = N'P'
     AND   o.name = N'sp_HumanEvents'
-) < DATEADD(HOUR, -1, SYSDATETIME())
+) > DATEADD(HOUR, -1, SYSDATETIME())
 BEGIN
     IF @debug = 1 BEGIN RAISERROR(N'Found views to create, beginning!', 0, 1) WITH NOWAIT; END;
     IF
@@ -4035,16 +4068,18 @@ BEGIN
 
             IF @debug = 1
             BEGIN
-                PRINT SUBSTRING(@view_sql, 0,     4000);
-                PRINT SUBSTRING(@view_sql, 4001,  8000);
-                PRINT SUBSTRING(@view_sql, 8001,  12000);
-                PRINT SUBSTRING(@view_sql, 12001, 16000);
-                PRINT SUBSTRING(@view_sql, 16001, 20000);
-                PRINT SUBSTRING(@view_sql, 20001, 24000);
-                PRINT SUBSTRING(@view_sql, 24001, 28000);
-                PRINT SUBSTRING(@view_sql, 28001, 32000);
-                PRINT SUBSTRING(@view_sql, 32001, 36000);
-                PRINT SUBSTRING(@view_sql, 36001, 40000);
+                /* SUBSTRING third arg is length, not end-position. See
+                   the @table_sql block below for the same fix. */
+                PRINT SUBSTRING(@view_sql,     1, 4000);
+                PRINT SUBSTRING(@view_sql,  4001, 4000);
+                PRINT SUBSTRING(@view_sql,  8001, 4000);
+                PRINT SUBSTRING(@view_sql, 12001, 4000);
+                PRINT SUBSTRING(@view_sql, 16001, 4000);
+                PRINT SUBSTRING(@view_sql, 20001, 4000);
+                PRINT SUBSTRING(@view_sql, 24001, 4000);
+                PRINT SUBSTRING(@view_sql, 28001, 4000);
+                PRINT SUBSTRING(@view_sql, 32001, 4000);
+                PRINT SUBSTRING(@view_sql, 36001, 4000);
             END;
 
             IF @debug = 1 BEGIN RAISERROR(N'creating view %s', 0, 1, @event_type_check) WITH NOWAIT; END;
@@ -4185,7 +4220,11 @@ END
         plan_handle = c.value(''xs:hexBinary((action[@name="plan_handle"]/value/text())[1])'', ''varbinary(64)'')
 FROM #human_events_xml_internal AS xet
 OUTER APPLY xet.human_events_xml.nodes(''//event'') AS oa(c)
-WHERE c.exist(''(data[@name="duration"]/value/text()[. > 0])'') = 1
+/* Match the live parser''s @gimme_danger semantic — without it, the
+   table-logging path silently dropped zero-duration waits even when
+   the user explicitly opted into capturing them via @gimme_danger = 1. */
+WHERE (c.exist(''(data[@name="duration"]/value/text()[. > 0])'') = 1
+    OR @gimme_danger = 1)
 AND   c.exist(''@timestamp[. > sql:variable("@date_filter")]'') = 1;')
                              )
                         WHEN @event_type_check LIKE N'%lock%' /*Blocking!*/
@@ -4685,23 +4724,31 @@ ORDER BY
 
             IF @debug = 1
             BEGIN
-                PRINT SUBSTRING(@table_sql, 0, 4000);
-                PRINT SUBSTRING(@table_sql, 4001, 8000);
-                PRINT SUBSTRING(@table_sql, 8001, 12000);
-                PRINT SUBSTRING(@table_sql, 12001, 16000);
-                PRINT SUBSTRING(@table_sql, 16001, 20000);
-                PRINT SUBSTRING(@table_sql, 20001, 24000);
-                PRINT SUBSTRING(@table_sql, 24001, 28000);
-                PRINT SUBSTRING(@table_sql, 28001, 32000);
-                PRINT SUBSTRING(@table_sql, 32001, 36000);
-                PRINT SUBSTRING(@table_sql, 36001, 40000);
+                /* SUBSTRING third arg is length, not end-position.
+                   Previous values (4001, 8000), (8001, 12000), etc. took
+                   8000 / 12000 / 16000 chars starting at each offset, so
+                   chunks massively overlapped instead of tiling. First
+                   call with start=0 also returned 3,999 chars (0-start
+                   eats one position). Normalized to 4000-char tiles
+                   starting at 1, 4001, 8001, ... */
+                PRINT SUBSTRING(@table_sql,     1, 4000);
+                PRINT SUBSTRING(@table_sql,  4001, 4000);
+                PRINT SUBSTRING(@table_sql,  8001, 4000);
+                PRINT SUBSTRING(@table_sql, 12001, 4000);
+                PRINT SUBSTRING(@table_sql, 16001, 4000);
+                PRINT SUBSTRING(@table_sql, 20001, 4000);
+                PRINT SUBSTRING(@table_sql, 24001, 4000);
+                PRINT SUBSTRING(@table_sql, 28001, 4000);
+                PRINT SUBSTRING(@table_sql, 32001, 4000);
+                PRINT SUBSTRING(@table_sql, 36001, 4000);
             END;
 
             /* this executes the insert */
             EXECUTE sys.sp_executesql
                 @table_sql,
-              N'@date_filter datetime2(7)',
-                @date_filter;
+              N'@date_filter datetime2(7), @gimme_danger bit',
+                @date_filter,
+                @gimme_danger;
 
             /*Update the worker table's last checked, and conditionally, updated dates*/
             UPDATE
@@ -4812,7 +4859,22 @@ BEGIN
 
     SET @executer = QUOTENAME(@output_database_name) + N'.sys.sp_executesql ';
 
-    /*Clean up sessions*/
+    /*
+    Clean up sessions. Match only what sp_HumanEvents itself creates:
+      HumanEvents_<event_type>_<guid>  (one-shot, @keep_alive = 0)
+      keeper_HumanEvents_<event_type>  (@keep_alive = 1)
+
+    Previous pattern N'%HumanEvents_%' had two issues:
+      - unanchored leading % — a user session named "MyHumanEventsFoo"
+        would match and get dropped.
+      - unescaped _ — LIKE treats _ as a single-char wildcard, so
+        "HumanEventsMonitor" (no literal underscore) would match via the
+        trailing % + the _ wildcard eating any one character.
+
+    Anchored to the prefix and escaped the literal underscore with a
+    bracket class so an operator using HumanEvents-adjacent names for
+    their own XE sessions isn't collateral damage.
+    */
     IF @azure = 0
     BEGIN
         SELECT
@@ -4824,7 +4886,8 @@ BEGIN
         FROM sys.server_event_sessions AS ses
         LEFT JOIN sys.dm_xe_sessions AS dxs
           ON dxs.name = ses.name
-        WHERE ses.name LIKE N'%HumanEvents_%';
+        WHERE ses.name LIKE N'HumanEvents[_]%'
+        OR    ses.name LIKE N'keeper[_]HumanEvents[_]%';
     END;
     ELSE
     BEGIN
@@ -4837,7 +4900,8 @@ BEGIN
         FROM sys.database_event_sessions AS ses
         LEFT JOIN sys.dm_xe_database_sessions AS dxs
           ON dxs.name = ses.name
-        WHERE ses.name LIKE N'%HumanEvents_%';
+        WHERE ses.name LIKE N'HumanEvents[_]%'
+        OR    ses.name LIKE N'keeper[_]HumanEvents[_]%';
     END;
 
     EXECUTE sys.sp_executesql

@@ -73,8 +73,8 @@ SET DATEFORMAT MDY;
 
 BEGIN
     SELECT
-        @version = '3.4',
-        @version_date = '20260401';
+        @version = '3.5',
+        @version_date = '20260420';
 
     IF @help = 1
     BEGIN
@@ -239,6 +239,21 @@ BEGIN
     BEGIN
         SELECT
             @custom_message_only = 0;
+    END;
+
+    /*
+    @custom_message_only = 1 means "skip the canned search strings and
+    look only for the user-supplied @custom_message". Without a message
+    to search for, every insert branch below would skip (the custom
+    insert is gated on @custom_message LIKE N'_%', which is NULL/false
+    for NULL or empty input), leaving #search empty and the whole
+    outer loop a no-op. Reject the combination up front.
+    */
+    IF @custom_message_only = 1
+    AND (@custom_message IS NULL OR LEN(@custom_message) = 0)
+    BEGIN
+        RAISERROR(N'@custom_message_only = 1 requires a non-empty @custom_message. Provide a search string or set @custom_message_only = 0.', 11, 1) WITH NOWAIT;
+        RETURN;
     END;
 
     /*Fix @end_date*/
@@ -412,8 +427,24 @@ BEGIN
     CROSS JOIN
     (
         SELECT
+            /*
+            Canary floor is normally "at least 90 days back" so these
+            server-identity strings are found regardless of how recent
+            the caller is interested in. When the caller supplied
+            @start_date/@end_date, @days_back is NULL at this point —
+            the previous CASE collapsed to NULL, produced a NULL
+            days_back literal, and xp_readerrorlog received NULL as a
+            date argument and errored. Fall back to @start_date in
+            date-range mode so the canary has a concrete floor.
+            */
             days_back =
-                N'"' + CONVERT(nvarchar(10), DATEADD(DAY, CASE WHEN @days_back > -90 THEN -90 ELSE @days_back END, SYSDATETIME()), 112) + N'"',
+                N'"' +
+                CASE
+                    WHEN @days_back IS NOT NULL
+                    THEN CONVERT(nvarchar(10), DATEADD(DAY, CASE WHEN @days_back > -90 THEN -90 ELSE @days_back END, SYSDATETIME()), 112)
+                    ELSE CONVERT(nvarchar(10), @start_date, 112)
+                END +
+                N'"',
             start_date =
                 N'"' + CONVERT(nvarchar(30), @start_date) + N'"',
             end_date =
@@ -491,7 +522,13 @@ BEGIN
     (
         VALUES
            (
-                N'"' + @custom_message + '"',
+                /* xp_readerrorlog search strings are wrapped in double quotes
+                   (see the #search.command computed column), so any literal "
+                   inside the user-supplied @custom_message must be doubled to
+                   avoid closing the argument early and producing an
+                   "Incorrect syntax near '+'" error when sp_executesql parses
+                   the generated batch. */
+                N'"' + REPLACE(@custom_message, N'"', N'""') + N'"',
                 N'"' + CONVERT(nvarchar(10), DATEADD(DAY, @days_back, SYSDATETIME()), 112) + N'"',
                 N'"' + CONVERT(nvarchar(30), @start_date) + N'"',
                 N'"' + CONVERT(nvarchar(30), @end_date) + N'"'

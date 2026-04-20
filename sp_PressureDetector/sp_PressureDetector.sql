@@ -78,8 +78,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LANGUAGE us_english;
 
 SELECT
-    @version = '6.4',
-    @version_date = '20260401';
+    @version = '6.5',
+    @version_date = '20260420';
 
 
 IF @help = 1
@@ -1028,6 +1028,11 @@ OPTION(MAXDOP 1, RECOMPILE);',
         hours_wait_time decimal(38,2),
         avg_ms_per_wait decimal(38,2),
         percent_signal_waits decimal(38,2),
+        /* Raw ms values so the sample-mode JOIN can compute
+           window-local percent_signal_waits as a proper delta ratio
+           rather than averaging the two cumulative snapshot ratios. */
+        signal_wait_time_ms bigint,
+        wait_time_ms bigint,
         waiting_tasks_count_n bigint,
         sample_time datetime,
         sorting bigint,
@@ -1173,6 +1178,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
             hours_wait_time,
             avg_ms_per_wait,
             percent_signal_waits,
+            signal_wait_time_ms,
+            wait_time_ms,
             waiting_tasks_count_n,
             sample_time,
             sorting
@@ -1325,6 +1332,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
                         0.
                     )
                 ),
+            dows.signal_wait_time_ms,
+            dows.wait_time_ms,
             dows.waiting_tasks_count,
             sample_time =
                 SYSDATETIME(),
@@ -1469,11 +1478,37 @@ OPTION(MAXDOP 1, RECOMPILE);',
                                 0.
                             )
                         ),
+                    /*
+                    Window-local percent_signal_waits = 100 * signal_delta / total_delta.
+                    Previously this averaged the two snapshots' CUMULATIVE
+                    percentages, which for a long-running server
+                    approximates the lifetime signal-wait percentage —
+                    not what the user asked for by setting @sample_seconds.
+                    Stored raw *_wait_time_ms columns on @waits so we can
+                    compute the correct ratio on the delta window.
+
+                    Deliberately NOT clamped to 100. sys.dm_os_wait_stats
+                    can briefly report signal_wait > wait in short sample
+                    windows due to counter update timing, so the raw value
+                    can exceed 100%. Showing the raw value lets the operator
+                    see that their window is too short / noisy for this
+                    metric to be meaningful; hiding it behind a cap would
+                    make a DMV jitter read like a confident 100%.
+                    */
                     percent_signal_waits =
                         CONVERT
                         (
                             decimal(38,1),
-                            (w2.percent_signal_waits + w.percent_signal_waits) / 2
+                            ISNULL
+                            (
+                                100.0 * (w2.signal_wait_time_ms - w.signal_wait_time_ms) /
+                                    NULLIF
+                                    (
+                                        1.0 * (w2.wait_time_ms - w.wait_time_ms),
+                                        0.
+                                    ),
+                                0.
+                            )
                         ),
                     waiting_tasks_count =
                         FORMAT((w2.waiting_tasks_count_n - w.waiting_tasks_count_n), 'N0'),
@@ -1739,8 +1774,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
 
         IF @debug = 1
         BEGIN
-            PRINT SUBSTRING(@disk_check, 1, 4000);
-            PRINT SUBSTRING(@disk_check, 4001, 8000);
+            PRINT SUBSTRING(@disk_check,    1, 4000);
+            PRINT SUBSTRING(@disk_check, 4001, 4000);
         END;
 
         INSERT
@@ -2284,13 +2319,16 @@ OPTION(MAXDOP 1, RECOMPILE);',
                                     total_data_files =
                                         COUNT_BIG(*),
                                     min_size_gb =
-                                        MIN(mf.size * 8) / 1024 / 1024,
+                                        CONVERT(decimal(19, 2), MIN(mf.size * 8.0) / 1024.0 / 1024.0),
                                     max_size_gb =
-                                        MAX(mf.size * 8) / 1024 / 1024,
+                                        CONVERT(decimal(19, 2), MAX(mf.size * 8.0) / 1024.0 / 1024.0),
+                                    /* Exclude percent-growth files: their mf.growth is a percentage,
+                                       not page count, so * 8 math produces meaningless GB numbers.
+                                       Percent-growth files are legacy/misconfigured in tempdb anyway. */
                                     min_growth_increment_gb =
-                                        MIN(mf.growth * 8) / 1024 / 1024,
+                                        CONVERT(decimal(19, 2), MIN(CASE WHEN mf.is_percent_growth = 0 THEN mf.growth * 8.0 END) / 1024.0 / 1024.0),
                                     max_growth_increment_gb =
-                                        MAX(mf.growth * 8) / 1024 / 1024,
+                                        CONVERT(decimal(19, 2), MAX(CASE WHEN mf.is_percent_growth = 0 THEN mf.growth * 8.0 END) / 1024.0 / 1024.0),
                                     scheduler_total_count =
                                         (
                                             SELECT
@@ -2576,14 +2614,18 @@ OPTION(MAXDOP 1, RECOMPILE);',
                 @database_size_out = N'
                 SELECT
                     @database_size_out_gb =
-                        SUM
+                        CONVERT
                         (
-                            CONVERT
+                            decimal(19, 2),
+                            SUM
                             (
-                                bigint,
-                                df.size
-                            )
-                        ) * 8 / 1024 / 1024
+                                CONVERT
+                                (
+                                    bigint,
+                                    df.size
+                                )
+                            ) * 8.0 / 1024.0 / 1024.0
+                        )
                 FROM sys.database_files AS df
                 OPTION(MAXDOP 1, RECOMPILE);';
         END;
@@ -2593,14 +2635,18 @@ OPTION(MAXDOP 1, RECOMPILE);',
                 @database_size_out = N'
                 SELECT
                     @database_size_out_gb =
-                        SUM
+                        CONVERT
                         (
-                            CONVERT
+                            decimal(19, 2),
+                            SUM
                             (
-                                bigint,
-                                mf.size
-                            )
-                        ) * 8 / 1024 / 1024
+                                CONVERT
+                                (
+                                    bigint,
+                                    mf.size
+                                )
+                            ) * 8.0 / 1024.0 / 1024.0
+                        )
                 FROM sys.master_files AS mf
                 WHERE mf.database_id > 4
                 OPTION(MAXDOP 1, RECOMPILE);';
@@ -2654,9 +2700,9 @@ OPTION(MAXDOP 1, RECOMPILE);',
                 indicators_system =
                     t.record.value('(/Record/ResourceMonitor/IndicatorsSystem)[1]', 'integer'),
                 physical_memory_available_gb =
-                    t.record.value('(/Record/MemoryRecord/AvailablePhysicalMemory)[1]', 'bigint') / 1024 / 1024,
+                    CONVERT(decimal(19, 2), t.record.value('(/Record/MemoryRecord/AvailablePhysicalMemory)[1]', 'bigint') / 1024.0 / 1024.0),
                 virtual_memory_available_gb =
-                    t.record.value('(/Record/MemoryRecord/AvailableVirtualAddressSpace)[1]', 'bigint') / 1024 / 1024
+                    CONVERT(decimal(19, 2), t.record.value('(/Record/MemoryRecord/AvailableVirtualAddressSpace)[1]', 'bigint') / 1024.0 / 1024.0)
             FROM sys.dm_os_sys_info AS osi
             CROSS JOIN
             (
@@ -2944,12 +2990,12 @@ OPTION(MAXDOP 1, RECOMPILE);',
                     SELECT
                         CONVERT
                         (
-                            bigint,
-                            c.value_in_use
+                            decimal(19, 2),
+                            CONVERT(bigint, c.value_in_use) / 1024.0
                         )
                     FROM sys.configurations AS c
                     WHERE c.name = N''max server memory (MB)''
-                ) / 1024,
+                ),
             max_memory_grant_cap =
                 @memory_grant_cap,
             memory_model =
@@ -3253,8 +3299,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
 
         IF @debug = 1
         BEGIN
-            PRINT SUBSTRING(@mem_sql, 1, 4000);
-            PRINT SUBSTRING(@mem_sql, 4001, 8000);
+            PRINT SUBSTRING(@mem_sql,    1, 4000);
+            PRINT SUBSTRING(@mem_sql, 4001, 4000);
         END;
 
         IF @log_to_table = 0
@@ -3969,8 +4015,8 @@ OPTION(MAXDOP 1, RECOMPILE);',
 
             IF @debug = 1
             BEGIN
-                PRINT SUBSTRING(@cpu_sql, 1, 4000);
-                PRINT SUBSTRING(@cpu_sql, 4001, 8000);
+                PRINT SUBSTRING(@cpu_sql,    1, 4000);
+                PRINT SUBSTRING(@cpu_sql, 4001, 4000);
             END;
 
             IF @log_to_table = 0

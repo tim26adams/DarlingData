@@ -126,8 +126,8 @@ BEGIN TRY
 These are for your outputs.
 */
 SELECT
-    @version = '6.4',
-    @version_date = '20260401';
+    @version = '6.5',
+    @version_date = '20260420';
 
 /*
 Helpful section! For help.
@@ -4307,12 +4307,20 @@ END;
 
 /*
 See if our cool new 2022 views exist.
-May have to tweak this if views aren't present in some cloudy situations.
+
+Threshold is >= 4 rather than = 5 because query_store_replicas is
+the one view in this set that standard Azure SQL Database tiers can
+be missing (replicas are managed differently there). The other four
+are what the sproc actually uses for hints, feedback, and variants,
+and those work fine on Azure SQL DB. Requiring all 5 would disable
+every 2022-era feature on DBs that are legitimately 2022-class.
+4 of 5 plus the rest being older builds is not a realistic shape —
+pre-2022 servers have 0 or 1 of these views, not 4.
 */
 SELECT
     @sql_2022_views =
         CASE
-            WHEN COUNT_BIG(*) = 5
+            WHEN COUNT_BIG(*) >= 4
             THEN 1
             ELSE 0
         END
@@ -8412,6 +8420,29 @@ to use @regression_where_clause.
 IF @regression_mode = 1
 BEGIN
 
+/*
+Fragility note for future maintainers:
+
+This block rebuilds @where_clause into @regression_where_clause by
+textually replacing the tokens '@start_date' and '@end_date' with their
+regression-baseline counterparts. It works today because the ONLY site
+that introduces those tokens into @where_clause is the date-range
+filter added further up (look for
+    "qsrs.last_execution_time >= @start_date
+     AND qsrs.last_execution_time <  @end_date")
+and that's exactly the fragment we want rewritten for the baseline
+window.
+
+If a new filter is ever added that references @start_date or @end_date
+for a DIFFERENT purpose (e.g. a statistical lookback window that should
+NOT move with the regression baseline), this string REPLACE will
+silently corrupt it. Either:
+  - don't use @start_date / @end_date as parameter names in any other
+    @where_clause += fragment, or
+  - switch to a sentinel-token approach (e.g. build with '{{start}}'
+    / '{{end}}' and REPLACE to the appropriate parameter name per
+    window) so the regression rewrite is explicit.
+*/
 SELECT
     @regression_where_clause =
         REPLACE
@@ -8873,22 +8904,29 @@ BEGIN
         @sql += N'
     SELECT
         qsq.query_hash,
-        /* All of these but count_executions are already floats. */
+        /* All of these but count_executions are already floats.
+           qsrs.avg_* columns are themselves per-interval averages, so
+           AVG(avg_*) is an unweighted mean of means. Weight by
+           count_executions to get the true cross-interval average —
+           otherwise intervals with very few executions get the same
+           pull on the number as intervals with many, and regression
+           detection skews toward sparse outlier intervals. */
         regression_metric_average =
             CONVERT
             (
                 float,
                 ' +
                 CASE @sort_order
-                     WHEN 'cpu' THEN N'AVG(qsrs.avg_cpu_time)'
-                     WHEN 'logical reads' THEN N'AVG(qsrs.avg_logical_io_reads)'
-                     WHEN 'physical reads' THEN N'AVG(qsrs.avg_physical_io_reads)'
-                     WHEN 'writes' THEN N'AVG(qsrs.avg_logical_io_writes)'
-                     WHEN 'duration' THEN N'AVG(qsrs.avg_duration)'
-                     WHEN 'memory' THEN N'AVG(qsrs.avg_query_max_used_memory)'
-                     WHEN 'tempdb' THEN CASE WHEN @new = 1 THEN N'AVG(qsrs.avg_tempdb_space_used)' ELSE N'AVG(qsrs.avg_cpu_time)' END
+                     WHEN 'cpu' THEN N'SUM(qsrs.avg_cpu_time * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'logical reads' THEN N'SUM(qsrs.avg_logical_io_reads * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'physical reads' THEN N'SUM(qsrs.avg_physical_io_reads * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'writes' THEN N'SUM(qsrs.avg_logical_io_writes * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'duration' THEN N'SUM(qsrs.avg_duration * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'memory' THEN N'SUM(qsrs.avg_query_max_used_memory * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'tempdb' THEN CASE WHEN @new = 1 THEN N'SUM(qsrs.avg_tempdb_space_used * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)' ELSE N'SUM(qsrs.avg_cpu_time * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)' END
+                     /* count_executions per interval is meaningful as a plain mean — it''s a count, not an average-of-averages. */
                      WHEN 'executions' THEN N'AVG(qsrs.count_executions)'
-                     WHEN 'rows' THEN N'AVG(qsrs.avg_rowcount)'
+                     WHEN 'rows' THEN N'SUM(qsrs.avg_rowcount * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
                      WHEN 'total cpu' THEN N'SUM(qsrs.avg_cpu_time * qsrs.count_executions)'
                      WHEN 'total logical reads' THEN N'SUM(qsrs.avg_logical_io_reads * qsrs.count_executions)'
                      WHEN 'total physical reads' THEN N'SUM(qsrs.avg_physical_io_reads * qsrs.count_executions)'
@@ -8897,7 +8935,8 @@ BEGIN
                      WHEN 'total memory' THEN N'SUM(qsrs.avg_query_max_used_memory * qsrs.count_executions)'
                      WHEN 'total tempdb' THEN CASE WHEN @new = 1 THEN N'SUM(qsrs.avg_tempdb_space_used * qsrs.count_executions)' ELSE N'SUM(qsrs.avg_cpu_time * qsrs.count_executions)' END
                      WHEN 'total rows' THEN N'SUM(qsrs.avg_rowcount * qsrs.count_executions)'
-                     ELSE CASE WHEN @sort_order_is_a_wait = 1 THEN N'AVG(waits.total_query_wait_time_ms)' ELSE N'AVG(qsrs.avg_cpu_time)' END
+                     /* Waits and the fallback path — waits are per-interval totals so AVG is correct; fallback mirrors cpu path. */
+                     ELSE CASE WHEN @sort_order_is_a_wait = 1 THEN N'AVG(waits.total_query_wait_time_ms)' ELSE N'SUM(qsrs.avg_cpu_time * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)' END
                 END
                 + N'
             )
@@ -8985,22 +9024,25 @@ BEGIN
         @sql += N'
     SELECT
         qsq.query_hash,
-        /* All of these but count_executions are already floats. */
+        /* All of these but count_executions are already floats.
+           Weighted by count_executions so the current-window average
+           matches the baseline-window computation (see baseline block
+           above) and regression percentages compare like with like. */
         current_metric_average =
             CONVERT
             (
                 float,
                 ' +
                 CASE @sort_order
-                     WHEN 'cpu' THEN N'AVG(qsrs.avg_cpu_time)'
-                     WHEN 'logical reads' THEN N'AVG(qsrs.avg_logical_io_reads)'
-                     WHEN 'physical reads' THEN N'AVG(qsrs.avg_physical_io_reads)'
-                     WHEN 'writes' THEN N'AVG(qsrs.avg_logical_io_writes)'
-                     WHEN 'duration' THEN N'AVG(qsrs.avg_duration)'
-                     WHEN 'memory' THEN N'AVG(qsrs.avg_query_max_used_memory)'
-                     WHEN 'tempdb' THEN CASE WHEN @new = 1 THEN N'AVG(qsrs.avg_tempdb_space_used)' ELSE N'AVG(qsrs.avg_cpu_time)' END
+                     WHEN 'cpu' THEN N'SUM(qsrs.avg_cpu_time * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'logical reads' THEN N'SUM(qsrs.avg_logical_io_reads * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'physical reads' THEN N'SUM(qsrs.avg_physical_io_reads * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'writes' THEN N'SUM(qsrs.avg_logical_io_writes * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'duration' THEN N'SUM(qsrs.avg_duration * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'memory' THEN N'SUM(qsrs.avg_query_max_used_memory * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
+                     WHEN 'tempdb' THEN CASE WHEN @new = 1 THEN N'SUM(qsrs.avg_tempdb_space_used * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)' ELSE N'SUM(qsrs.avg_cpu_time * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)' END
                      WHEN 'executions' THEN N'AVG(qsrs.count_executions)'
-                     WHEN 'rows' THEN N'AVG(qsrs.avg_rowcount)'
+                     WHEN 'rows' THEN N'SUM(qsrs.avg_rowcount * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)'
                      WHEN 'total cpu' THEN N'SUM(qsrs.avg_cpu_time * qsrs.count_executions)'
                      WHEN 'total logical reads' THEN N'SUM(qsrs.avg_logical_io_reads * qsrs.count_executions)'
                      WHEN 'total physical reads' THEN N'SUM(qsrs.avg_physical_io_reads * qsrs.count_executions)'
@@ -9009,7 +9051,7 @@ BEGIN
                      WHEN 'total memory' THEN N'SUM(qsrs.avg_query_max_used_memory * qsrs.count_executions)'
                      WHEN 'total tempdb' THEN CASE WHEN @new = 1 THEN N'SUM(qsrs.avg_tempdb_space_used * qsrs.count_executions)' ELSE N'SUM(qsrs.avg_cpu_time * qsrs.count_executions)' END
                      WHEN 'total rows' THEN N'SUM(qsrs.avg_rowcount * qsrs.count_executions)'
-                     ELSE CASE WHEN @sort_order_is_a_wait = 1 THEN N'AVG(waits.total_query_wait_time_ms)' ELSE N'AVG(qsrs.avg_cpu_time)' END
+                     ELSE CASE WHEN @sort_order_is_a_wait = 1 THEN N'AVG(waits.total_query_wait_time_ms)' ELSE N'SUM(qsrs.avg_cpu_time * qsrs.count_executions) / NULLIF(SUM(CONVERT(float, qsrs.count_executions)), 0)' END
                 END
                 + N'
             )
@@ -10832,13 +10874,13 @@ SELECT
     total_query_wait_time_ms =
         SUM(qsws_with_lasts.total_query_wait_time_ms),
     avg_query_wait_time_ms =
-        SUM(qsws_with_lasts.avg_query_wait_time_ms),
+        AVG(qsws_with_lasts.avg_query_wait_time_ms),
     last_query_wait_time_ms =
         MAX(qsws_with_lasts.partitioned_last_query_wait_time_ms),
     min_query_wait_time_ms =
-        SUM(qsws_with_lasts.min_query_wait_time_ms),
+        MIN(qsws_with_lasts.min_query_wait_time_ms),
     max_query_wait_time_ms =
-        SUM(qsws_with_lasts.max_query_wait_time_ms)
+        MAX(qsws_with_lasts.max_query_wait_time_ms)
 FROM
 (
     SELECT
@@ -10863,15 +10905,24 @@ FROM
     FROM #query_store_runtime_stats AS qsrs
     CROSS APPLY
     (
-        SELECT TOP (5)
+        /*
+        Pull every wait category captured for this (interval, plan).
+        The previous TOP (5) ORDER BY avg_query_wait_time_ms DESC here
+        dropped wait categories ranked 6+ per interval before the outer
+        GROUP BY ran, so a category that was (say) 6th worst in one
+        interval but 2nd worst in another would silently have the first
+        interval''s contribution missing from its totals. The outer
+        aggregation groups by (plan_id, wait_category_desc) and the
+        number of wait categories per interval is capped by QS at a
+        small set, so removing the TOP does not explode row counts.
+        */
+        SELECT
             qsws.*
         FROM ' + @database_name_quoted + N'.sys.query_store_wait_stats AS qsws
         WHERE qsws.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
         AND   qsws.plan_id = qsrs.plan_id
         AND   qsws.wait_category > 0
         AND   qsws.min_query_wait_time_ms > 0
-        ORDER BY
-            qsws.avg_query_wait_time_ms DESC
     ) AS qsws
     WHERE qsrs.database_id = @database_id
 ) AS qsws_with_lasts
@@ -12263,11 +12314,21 @@ OPTION(RECOMPILE);' + @nc10
 
     IF @debug = 1
     BEGIN
+        /*
+        PRINT truncates at 4000 chars for nvarchar/8000 for varchar, so
+        long @sql needs to be chunked. SUBSTRING's third argument is
+        length, not end-position — the previous calls had 4001/8000,
+        8001/12000, 12001/16000 which tiled *lengths* against *starts*
+        and produced massively overlapping windows (each chunk dumped
+        8k/12k/16k chars from its start, not the intended 4k). The
+        first chunk also started at 0, which SUBSTRING treats as "one
+        before position 1" — only 3,999 chars came out. Fixed both.
+        */
         PRINT LEN(@sql);
-        PRINT SUBSTRING(@sql, 0, 4000);
-        PRINT SUBSTRING(@sql, 4001, 8000);
-        PRINT SUBSTRING(@sql, 8001, 12000);
-        PRINT SUBSTRING(@sql, 12001, 16000);
+        PRINT SUBSTRING(@sql,     1, 4000);
+        PRINT SUBSTRING(@sql,  4001, 4000);
+        PRINT SUBSTRING(@sql,  8001, 4000);
+        PRINT SUBSTRING(@sql, 12001, 4000);
     END;
 
     EXECUTE sys.sp_executesql
