@@ -2263,8 +2263,14 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             SET @stolen_memory_pct =
                     (@stolen_memory_gb / (@buffer_pool_size_gb + @stolen_memory_gb)) * 100.0;
 
-            /* Query memory health history if available (SQL Server 2025+) */
+            /* Query memory health history if available (SQL Server 2025+).
+               OBJECT_ID existence-check only requires VIEW DEFINITION
+               metadata access; reading the DMV itself requires
+               VIEW SERVER STATE. Without gating on @has_view_server_state
+               a non-sysadmin caller would hit an unhandled permission
+               error from inside the sp_executesql. */
             IF @health_history_exists = CONVERT(bit, 'true')
+            AND @has_view_server_state = 1
             BEGIN
                 EXECUTE sys.sp_executesql
                     N'
