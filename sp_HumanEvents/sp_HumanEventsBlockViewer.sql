@@ -937,6 +937,16 @@ IF @debug = 1
 BEGIN
     RAISERROR('What kind of target does %s have?', 0, 1, @session_name) WITH NOWAIT;
 END;
+/*
+Auto-detect @target_type when not supplied. When a session has both
+targets attached, ORDER BY t.target_name picks 'event_file' over
+'ring_buffer' alphabetically — this is DELIBERATE. event_file is the
+more reliable target (ring_buffer has a finite in-memory window and
+drops older events under pressure), so a blocking report built from
+the file target has a better chance of covering the full window the
+caller asked for. Don't "fix" the ORDER BY to ring_buffer unless you
+want faster but less complete reads.
+*/
 IF  @target_type IS NULL
 AND @is_system_health = 0
 BEGIN
